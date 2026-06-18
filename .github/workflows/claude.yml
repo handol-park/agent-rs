@@ -1,0 +1,51 @@
+name: Claude Code
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+# No `concurrency` here on purpose: the mention bot is one run per comment, and
+# cancelling an in-flight response (#1 is for the re-run-on-push reviewer) would
+# drop a half-written reply.
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    # #2: cap a runaway agent job (default would be 6h).
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read # Required for Claude to read CI results on PRs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@806af32823ef69c8ef357086c573a902af641307 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Lets Claude read CI results on PRs (e.g. the `make check` workflow).
+          additional_permissions: |
+            actions: read
+
+          # With no `prompt:`, Claude follows the instructions in the comment that
+          # tagged it — e.g. "@claude please address the review comments above".
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
