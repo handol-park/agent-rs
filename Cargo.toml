@@ -16,6 +16,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
 
-[[example]]
-name = "run"
-path = "examples/run.rs"
+# The `run` example target is added in P6, once examples/run.rs exists.
