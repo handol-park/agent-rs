@@ -59,8 +59,14 @@ pub enum ActionOutcome {
         name: String,
         output: Value,
     },
-    /// Something went wrong but the run continues.
-    Recoverable(RecoverableError),
+    /// Something went wrong but the run continues. `call_id` links the failure
+    /// back to the tool call that caused it (so it can be replayed to the model
+    /// as a tool result); it is `None` for failures not tied to a call, such as
+    /// an invalid `Finish`.
+    Recoverable {
+        call_id: Option<String>,
+        error: RecoverableError,
+    },
     /// The model chose to finish.
     Finished { message: String },
 }

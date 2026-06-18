@@ -11,6 +11,7 @@ pub mod budget;
 pub mod error;
 pub mod event;
 pub mod memory;
+pub mod planner;
 pub mod provider;
 pub mod tool;
 
@@ -19,6 +20,8 @@ pub use budget::{Budget, TerminalReason};
 pub use error::{AgentError, PlannerError, ProviderError, ToolError};
 pub use event::RunEvent;
 pub use memory::{Memory, MemorySnapshot, Record};
+pub use planner::{model::ModelPlanner, rule::RulePlanner};
+pub use planner::{PlanContext, PlanOutput, Planner};
 pub use provider::{fake::FakeProvider, openai::OpenAiProvider};
 pub use provider::{Message, ModelRequest, ModelResponse, Provider, ToolCall, Usage};
 pub use tool::{default_registry, Tool, ToolRegistry, ToolSchema};

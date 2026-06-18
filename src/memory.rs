@@ -109,7 +109,10 @@ mod tests {
         let mut m = Memory::new("g");
         m.record_outcome(
             2,
-            ActionOutcome::Recoverable(RecoverableError::UnknownTool("nope".into())),
+            ActionOutcome::Recoverable {
+                call_id: Some("c1".into()),
+                error: RecoverableError::UnknownTool("nope".into()),
+            },
         );
         let snap = m.snapshot();
         assert_eq!(snap.schema, 1);
