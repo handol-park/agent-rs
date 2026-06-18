@@ -1,0 +1,33 @@
+name: CI
+
+# Build/test/lint gate. Runs the same `make check` (fmt + clippy + test) that
+# contributors run locally, through the flake's pinned dev shell — so CI and
+# local use the identical toolchain and clippy lints can't drift.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A new push to a branch cancels the in-flight check for that ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Cap a runaway job; first run pays the flake toolchain fetch.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: make check (fmt + clippy + test)
+        run: nix develop -c make check
