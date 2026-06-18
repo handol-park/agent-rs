@@ -11,9 +11,11 @@ pub mod budget;
 pub mod error;
 pub mod event;
 pub mod memory;
+pub mod tool;
 
 pub use action::{Action, ActionOutcome, RecoverableError};
 pub use budget::{Budget, TerminalReason};
 pub use error::{AgentError, PlannerError, ProviderError, ToolError};
 pub use event::RunEvent;
 pub use memory::{Memory, MemorySnapshot, Record};
+pub use tool::{default_registry, Tool, ToolRegistry, ToolSchema};
