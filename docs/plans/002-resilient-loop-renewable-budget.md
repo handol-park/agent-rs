@@ -11,6 +11,12 @@ in-crate (a tiny seedable xorshift PRNG — no `rand` dependency); the seed is
 injectable so tests are deterministic. **No date library** — time is
 `tokio::time::Instant`, pausable under `tokio::test(start_paused)` (goal 18).
 
+**Every** `Instant` in v0.2 (`Budget`, `BrainstemState`, `Snapshot`, `Decision::Throttle`,
+all sleeps/timeouts) **MUST** be `tokio::time::Instant`, never `std::time::Instant` —
+`start_paused` only mocks the tokio clock, so a stray `std` instant silently breaks
+determinism (goal 18). 001's `src/lib.rs` imports `use std::time::Instant`; that import
+**MUST** be migrated when its loop is replaced.
+
 ## Module map
 
 ```
@@ -66,16 +72,25 @@ pub enum Termination { Cancelled, Fatal(AgentError), Stopped }           // run-
 pub enum Period { Daily, Weekly, Every(Duration) }                       // Daily=24h, Weekly=7d
 pub struct Budget { pub period: Period, pub max_tokens: u64 }
 pub struct BudgetState { start: Instant, window: u64, used: u64 }
-//  window(now)=floor((now-start)/period); refresh(now) rolls window & zeroes `used` on crossing (goal 15);
+//  window(now)=floor(now.saturating_duration_since(start)/period)  // saturating_duration_since, NOT
+//      `now - start` — direct Instant subtraction panics if now < start (possible under paused/mocked time);
+//  refresh(now) rolls window & zeroes `used` on crossing (goal 15);
 //  charge(now,t) = refresh then used = used.saturating_add(t)   // saturating — fixes the 001 overflow bug
-//  remaining(now), exhausted(now), next_reset(now)=start+(window(now)+1)*period
+//  remaining(now), exhausted(now)= used >= max_tokens (a fresh window funds ≥1 call iff max_tokens>0),
+//  next_reset(now)=start+(window(now)+1)*period
 
 // error.rs — classification drives goal 3
 impl ProviderError { fn class(&self) -> ErrorClass } // Transient | ServiceFatal | TaskFatal
-//  Transport|Decode|Api{429, any 5xx} -> Transient ; Api{401,403,404} -> ServiceFatal ;
-//  Api{400,422} -> TaskFatal ; `_` (any other status: unlisted 4xx / 1xx / 3xx) -> TaskFatal
+//  Transport|Api{429, any 5xx} -> Transient ; Api{401,403,404} -> ServiceFatal ;
+//  Decode|Api{400,422} -> TaskFatal ; `_` (any other status: unlisted 4xx / 1xx / 3xx) -> TaskFatal
 //  — classification is TOTAL (goal 3 "Unclassified status"): the match has a `_` arm, no
 //  ProviderError is unhandled. 5xx is a range match, not the literal 500/503.
+//  Decode is TaskFatal, NOT Transient: an unparseable 2xx body is non-transient (re-issuing the
+//  identical request won't change the bytes), so unbounded retry would spin forever (goal 3 "fail
+//  fast on non-transient"). Failed at TASK level (not Service) to honor "must not stop until the
+//  user says so": the service keeps serving; a systemic decode bug surfaces as repeated, visible
+//  per-task Decode failures the operator can act on. (Flip to ServiceFatal if a decode mismatch
+//  should halt the whole service.)
 ```
 
 ## ModelMind::decide (goals 2–5)
@@ -105,13 +120,26 @@ producers on the same channel (`mpsc` is multi-producer).
    for an at-start **or** a mid-decide throttle alike.)_
 2. **Attempt loop** — each iteration may make one provider call:
    - `budget.refresh(now)` — if it rolled the window, emit `WindowReset{window}`.
-     If `budget.exhausted(now)` **before** a usable
+     If `budget.exhausted(now)` (`used >= max_tokens`) **before** a usable
      decision: if `self.resuming` (a *freshly reset* full window still cannot fund
      this decision) → `Failed(Reason::Task(BudgetTooSmall))` (goal 4); else set
      `self.resuming = true` and return `Throttle(budget.next_reset(now))`. _(The
      flag lives on the struct, so it survives the `Throttle` → sleep → re-`decide`
-     boundary — fixing the unreachable-guard bug; SC 13 now fires when a fresh
-     window re-exhausts.)_
+     boundary — fixing the unreachable-guard bug.)_
+   - **When `BudgetTooSmall` actually fires** (resolving the SC-13 reachability
+     question): the check is *before* the call, and a call's token cost is unknown
+     until it returns. So a fresh window with `max_tokens > 0` is **never** exhausted
+     at the top — its first call always proceeds and is allowed to **overspend** (one
+     call may push `used` past `max_tokens` via saturating charge; you cannot prevent
+     the first call). The exhausted-before-usable-decision state is therefore reached
+     only by either **(a)** a window that funds *zero* calls (`max_tokens == 0`), or
+     **(b)** a single `decide` that needs *more than one* call (a malformed re-prompt)
+     where a full fresh window funds only the first. In case (a)/(b), the first
+     exhaustion → `Throttle`; after reset the `Resume` decide hits the same fresh-window
+     exhaustion with `resuming == true` → `BudgetTooSmall`. A window with `max_tokens > 0`
+     but smaller than a *typical* call's cost does **not** fail — it makes throttled
+     progress (≤ one decide per window). SC 13 uses case (a), `max_tokens == 0`, as the
+     simplest deterministic trigger.
    - Call the provider inside `tokio::time::timeout(per_call)`. Classify
      (`ProviderError::class`): Transient → `sleep(backoff)` (capped 60s, full
      jitter), emit `RetryScheduled`, retry **unbounded** (goal 3); ServiceFatal →
@@ -138,18 +166,27 @@ the Decision }`. Destructure `self` into disjoint field borrows so the status
 arm and the decide future borrow different fields. Then match the Decision:
 
 - `Act(cmd)` → `steps+=1`; if `steps>max_steps` → emit+`TaskFailed(NoProgress)`,
-  end episode (goal 8). Else actuate **off-loop** via
-  `spawn_blocking(move || registry.execute(cmd))` (goal 7), wrapped in the same
-  cancel/status `select!`; result → `Observation`; `perception=Observation(obs)`.
-  Unknown tool → `Observation::Recoverable` (goal 13).
+  end episode (goal 8). Else actuate **off-loop**: clone the `Arc<ToolRegistry>` and
+  do the lookup-and-run *inside* the closure (the `'static` bound on `spawn_blocking`
+  forbids borrowing a `&dyn Tool` across it) —
+  `spawn_blocking(move || match registry.get(&cmd.name) { Some(t) => t.execute(&cmd.input), None => Err(UnknownTool) })`
+  (goal 7). _(001's `ToolRegistry` has `get`/`register`/`schemas` but no `execute`; either
+  add an `execute(&self, cmd)` helper that does this match, or inline it as above — do not
+  assume a pre-existing `registry.execute`.)_ Wrap the join in the same cancel/status
+  `select!`; result → `Observation`; `perception=Observation(obs)`. Unknown tool →
+  `Observation::Recoverable` (goal 13).
 - `Done(o)` → emit `TaskCompleted`, `task.reply.send(Completed(o))`, end episode.
 - `Failed(Task(f))` → emit `TaskFailed(f)`, reply `Failed(f)`, end episode —
   **service continues** (goal 10).
 - `Failed(Service(e))` → return `Termination::Fatal(e)` (ends the run).
-- `Throttle(t)` → `lifecycle=Throttling`, emit `ThrottleSleep{wake:t}`,
-  `select!{ cancel → Cancelled, sleep_until(t) → () }`, then re-decide with
-  `Perception::Resume` (goal 9) — **not** the original perception, so the mind
-  does not re-fold it. No step consumed.
+- `Throttle(t)` → `lifecycle=Throttling`, emit `ThrottleSleep{wake:t}`, then sleep in
+  a **loop** that also services Status (goal 11/12 — a throttle may last hours; a Status
+  query MUST NOT block on it):
+  `loop { select!{ cancel → return Cancelled, status_rx → reply(cached snapshot), sleep_until(t) → break } }`,
+  then re-decide with `Perception::Resume` (goal 9) — **not** the original perception, so
+  the mind does not re-fold it. No step consumed. _(Both fresh-eyes reviewers caught the
+  earlier two-arm `select!` omitting `status_rx`; the cached `Snapshot` already reflects
+  `Throttling`, so the reply is a disjoint-field borrow, never touching the budget mid-sleep.)_
 
 ## RunEvent (goal 17)
 
@@ -164,7 +201,7 @@ arm and the decide future borrow different fields. Then match the Decision:
 |----|------|
 | 1 | FakeProvider scripts 503×2 then ok → assert `RetryScheduled`×2, episode proceeds, no Termination. **Backoff timing:** after retry 1, advance the paused clock by `<` expected delay → assert no retry 2; advance past it → assert retry 2 (covers the exponential math, not just the count) |
 | 2 | FakeProvider 401 → `Termination::Fatal`, zero retries |
-| 3 | 400 (and separately a step-liveness trip) → `TaskFailed`, next task still runs |
+| 3 | 400, a `Decode` failure (assert exactly one provider call, **no** `RetryScheduled` — proves Decode is not transient), and separately a step-liveness trip → `TaskFailed`, next task still runs |
 | 4 | malformed×2 recovered; ×3 → `TaskFailed(Malformed)`, service continues |
 | 5 | tiny `max_tokens`; advance clock → `Throttle` then resume after reset; `used` zeroed |
 | 6,12 | cancel mid-sleep (cancel before advancing past wake) and mid-decide (pending FakeMind) → `Cancelled` |
@@ -173,7 +210,7 @@ arm and the decide future borrow different fields. Then match the Decision:
 | 9 | Status query during Working → `Snapshot` with expected lifecycle/tokens/steps |
 | 10 | command for an unregistered tool → `Observation::Recoverable`, episode continues |
 | 11 | assert the event set is emitted across the above — **including** `WindowReset` (from SC 5's window roll) and `Recovered` (from SC 10's unknown tool), plus task-received/command/command-result/retry-scheduled/throttle-sleep/task-completed/failed/terminal |
-| 13 | `max_tokens` < one decide cost → assert **first** `decide` returns `Throttle` + `ThrottleSleep` emitted; advance clock past reset; **then** `decide(Resume)` against the still-too-small fresh window → `TaskFailed(BudgetTooSmall)`; service continues. (Asserting the intermediate `Throttle` rejects an impl that fails on first exhaustion, skipping the wait — goal 4 order.) |
+| 13 | **`max_tokens == 0`** (a window funding zero calls — the simplest deterministic trigger; see "When BudgetTooSmall actually fires"): assert **first** `decide` returns `Throttle` + `ThrottleSleep` emitted with **no provider call made**; advance clock past reset; **then** `decide(Resume)` against the fresh-but-still-zero window → `TaskFailed(BudgetTooSmall)`; service continues. (Asserting the intermediate `Throttle` rejects an impl that fails on first exhaustion, skipping the wait — goal 4 order.) |
 
 ## Build order (commit per phase)
 

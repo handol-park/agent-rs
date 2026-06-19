@@ -80,7 +80,7 @@ marked "from 001."
    `Decision::Done`. _(This folds 001's `Planner` into the Mind.)_
 3. The Mind **MUST** classify every provider error and own LLM-call resilience:
    - **Transient** (connection/network failure, a per-call timeout, HTTP 429,
-     HTTP 5xx, body-`Decode`): retry with exponential backoff + jitter. Defaults
+     HTTP 5xx): retry with exponential backoff + jitter. Defaults
      **MUST** be base `1s`, multiplier `2`, cap `60s`, full jitter. Each retry
      **MUST** emit a `RunEvent` (goal 17). Retries are intentionally
      **unbounded**: a run ends only on success, cancellation, or a service-fatal
@@ -93,8 +93,13 @@ marked "from 001."
    - **Service-fatal** (HTTP 401, 403, 404 — auth / endpoint-or-model config):
      return `Failed` flagged service-fatal; the brainstem **MUST** escalate it to run
      termination.
-   - **Task-fatal** (HTTP 400, 422 — request shaped by this task's content):
-     return `Failed` (task-scoped); the brainstem fails the task and keeps serving.
+   - **Task-fatal** (HTTP 400, 422 — request shaped by this task's content; **and
+     a body-`Decode` failure** — an unparseable response body is non-transient, so
+     retrying the identical request **MUST NOT** loop forever): return `Failed`
+     (task-scoped); the brainstem fails the task and keeps serving. _(informational:
+     `Decode` is failed at the task level, not service-fatal, so a perpetual agent
+     keeps serving — a systemic decode mismatch then surfaces as repeated, visible
+     per-task failures rather than a silent infinite retry or a whole-service halt.)_
    - **Unclassified status** — classification **MUST** be total (no provider
      response unhandled): any **5xx** not listed above **MUST** be transient
      (server-side, may self-heal); every **other** unlisted status (unlisted 4xx,
@@ -246,8 +251,10 @@ The agent reacts to these signals (handling defined above):
    attempt, and advancing past it yields the next — so the timing math is covered,
    not just the event count.
 2. A service-fatal error (401) → the run terminates `Fatal`, with no retry.
-3. A task-fatal error (400, or a step-liveness trip) → the task fails and the
-   **service continues** to the next task.
+3. A task-fatal error (400, a body-`Decode` failure, or a step-liveness trip) →
+   the task fails and the **service continues** to the next task. _(The `Decode`
+   case also proves it is **not** retried transiently — exactly one provider call,
+   no `RetryScheduled`.)_
 4. Two consecutive malformed responses are recovered within cognition and the
    episode continues; a third consecutive malformed response → task-fatal, and
    the service continues (verifies the goal-5 normative cap).
@@ -273,14 +280,19 @@ The agent reacts to these signals (handling defined above):
 12. Cancellation honored **mid-decide**: cancelling while a `decide` future is in
     flight terminates `Cancelled`; because actuation runs off the loop (goal 7), a
     cancel during a tool call is likewise observed.
-13. A window whose `max_tokens` is smaller than a single decision's cost → that
+13. A window that cannot fund a single provider call (`max_tokens == 0`) → the
     decision returns task-fatal `Failed` and the service continues (verifies
-    goal 4's no-deadlock rule). The test **MUST** assert the **intermediate
-    `Throttle`** first — initial `decide` returns `Throttle`, a `ThrottleSleep`
-    event is emitted, the clock is advanced past the reset, and only the
-    `decide(Resume)` against the freshly-reset-but-still-too-small window returns
-    task-fatal — so an implementation that skips the throttle and fails on first
-    exhaustion (violating goal 4's wait-then-decide order) is rejected.
+    goal 4's no-deadlock rule). _(informational: the exhaustion check is **before**
+    each call and a call's cost is unknown until it returns, so a window with
+    `max_tokens > 0` is never exhausted at the top of a fresh `decide` — its first
+    call always proceeds and may overspend once; thus the smallest deterministic
+    trigger for this criterion is a zero-quota window.)_ The test **MUST** assert
+    the **intermediate `Throttle`** first — the initial `decide` returns `Throttle`
+    with **no provider call made**, a `ThrottleSleep` event is emitted, the clock
+    is advanced past the reset, and only the `decide(Resume)` against the
+    freshly-reset-but-still-zero window returns task-fatal — so an implementation
+    that skips the throttle and fails on first exhaustion (violating goal 4's
+    wait-then-decide order) is rejected.
 
 ## Stack _(informational)_
 
