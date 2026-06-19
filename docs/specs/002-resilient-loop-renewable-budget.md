@@ -80,7 +80,7 @@ marked "from 001."
    `Decision::Done`. _(This folds 001's `Planner` into the Mind.)_
 3. The Mind **MUST** classify every provider error and own LLM-call resilience:
    - **Transient** (connection/network failure, a per-call timeout, HTTP 429,
-     HTTP 5xx): retry with exponential backoff + jitter. Defaults
+     HTTP 5xx, body-`Decode`): retry with exponential backoff + jitter. Defaults
      **MUST** be base `1s`, multiplier `2`, cap `60s`, full jitter. Each retry
      **MUST** emit a `RunEvent` (goal 17). Retries are intentionally
      **unbounded**: a run ends only on success, cancellation, or a service-fatal
@@ -93,13 +93,8 @@ marked "from 001."
    - **Service-fatal** (HTTP 401, 403, 404 — auth / endpoint-or-model config):
      return `Failed` flagged service-fatal; the brainstem **MUST** escalate it to run
      termination.
-   - **Task-fatal** (HTTP 400, 422 — request shaped by this task's content; **and
-     a body-`Decode` failure** — an unparseable response body is non-transient, so
-     retrying the identical request **MUST NOT** loop forever): return `Failed`
-     (task-scoped); the brainstem fails the task and keeps serving. _(informational:
-     `Decode` is failed at the task level, not service-fatal, so a perpetual agent
-     keeps serving — a systemic decode mismatch then surfaces as repeated, visible
-     per-task failures rather than a silent infinite retry or a whole-service halt.)_
+   - **Task-fatal** (HTTP 400, 422 — request shaped by this task's content):
+     return `Failed` (task-scoped); the brainstem fails the task and keeps serving.
    - **Unclassified status** — classification **MUST** be total (no provider
      response unhandled): any **5xx** not listed above **MUST** be transient
      (server-side, may self-heal); every **other** unlisted status (unlisted 4xx,
@@ -123,6 +118,12 @@ marked "from 001."
    normative so a model producing endless garbage cannot spin invisibly; each
    re-prompt also draws on the token budget.)_ It **MUST NOT** be treated as a
    transient transport retry and **MUST NOT** terminate the service.
+   _(informational: malformed output is distinct from a body-`Decode` failure
+   (goal 3, transient). Malformed means the body **decoded** but its content is
+   unusable — so the Mind has something to feed back into an **informed re-prompt**,
+   bounded at 2. `Decode` means the body never parsed — there is nothing to show the
+   model, so the only retry is a **blind re-issue** of the identical request, which
+   is exactly transient backoff. Different mechanism, hence different layer.)_
 
 ### Brainstem (body + runtime) — the crate MUST…
 
@@ -243,18 +244,17 @@ The agent reacts to these signals (handling defined above):
 `make check` green, plus deterministic offline tests (a fake `Mind` and a fake
 `Brainstem`/`Provider`, an injected clock, `tokio::test(start_paused)`) proving:
 
-1. A transient LLM error (503 / dropped connection) → the mind retries with
-   backoff, **emitting a retry event per attempt** → the episode proceeds; the
-   service never terminates. _Determinism:_ because the clock is paused, the test
+1. A transient LLM error (503 / dropped connection / a body-`Decode` failure) →
+   the mind retries with backoff, **emitting a retry event per attempt** → the
+   episode proceeds; the service never terminates. _(The `Decode` case verifies it
+   is classified transient — a blind re-issue — not task-fatal.)_ _Determinism:_ because the clock is paused, the test
    **MUST** also assert the backoff is **exponential** — after retry attempt *N*,
    advancing the clock by **less than** the expected delay yields no further
    attempt, and advancing past it yields the next — so the timing math is covered,
    not just the event count.
 2. A service-fatal error (401) → the run terminates `Fatal`, with no retry.
-3. A task-fatal error (400, a body-`Decode` failure, or a step-liveness trip) →
-   the task fails and the **service continues** to the next task. _(The `Decode`
-   case also proves it is **not** retried transiently — exactly one provider call,
-   no `RetryScheduled`.)_
+3. A task-fatal error (400, or a step-liveness trip) → the task fails and the
+   **service continues** to the next task.
 4. Two consecutive malformed responses are recovered within cognition and the
    episode continues; a third consecutive malformed response → task-fatal, and
    the service continues (verifies the goal-5 normative cap).

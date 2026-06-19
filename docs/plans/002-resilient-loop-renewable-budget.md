@@ -81,16 +81,17 @@ pub struct BudgetState { start: Instant, window: u64, used: u64 }
 
 // error.rs — classification drives goal 3
 impl ProviderError { fn class(&self) -> ErrorClass } // Transient | ServiceFatal | TaskFatal
-//  Transport|Api{429, any 5xx} -> Transient ; Api{401,403,404} -> ServiceFatal ;
-//  Decode|Api{400,422} -> TaskFatal ; `_` (any other status: unlisted 4xx / 1xx / 3xx) -> TaskFatal
+//  Transport|Decode|Api{429, any 5xx} -> Transient ; Api{401,403,404} -> ServiceFatal ;
+//  Api{400,422} -> TaskFatal ; `_` (any other status: unlisted 4xx / 1xx / 3xx) -> TaskFatal
 //  — classification is TOTAL (goal 3 "Unclassified status"): the match has a `_` arm, no
 //  ProviderError is unhandled. 5xx is a range match, not the literal 500/503.
-//  Decode is TaskFatal, NOT Transient: an unparseable 2xx body is non-transient (re-issuing the
-//  identical request won't change the bytes), so unbounded retry would spin forever (goal 3 "fail
-//  fast on non-transient"). Failed at TASK level (not Service) to honor "must not stop until the
-//  user says so": the service keeps serving; a systemic decode bug surfaces as repeated, visible
-//  per-task Decode failures the operator can act on. (Flip to ServiceFatal if a decode mismatch
-//  should halt the whole service.)
+//  Decode is Transient: a 2xx body that won't parse is usually transient (truncated body,
+//  proxy/CDN garbage, transient server malfunction); the only available retry is a BLIND re-issue
+//  of the identical request — which IS transient backoff. This differs from malformed output
+//  (goal 5): malformed DECODED fine but the content is unusable, so it gets an INFORMED re-prompt
+//  capped at 2. A rare permanent Decode (provider schema change / our deser bug) then retries
+//  unbounded exactly like a persistent 5xx — visible via RetryScheduled + Status, operator cancels
+//  (the deliberate observability-over-termination choice; consistent, not a special case).
 ```
 
 ## ModelMind::decide (goals 2–5)
@@ -199,9 +200,9 @@ arm and the decide future borrow different fields. Then match the Decision:
 
 | SC | Test |
 |----|------|
-| 1 | FakeProvider scripts 503×2 then ok → assert `RetryScheduled`×2, episode proceeds, no Termination. **Backoff timing:** after retry 1, advance the paused clock by `<` expected delay → assert no retry 2; advance past it → assert retry 2 (covers the exponential math, not just the count) |
+| 1 | FakeProvider scripts 503×2 then ok → assert `RetryScheduled`×2, episode proceeds, no Termination. **Backoff timing:** after retry 1, advance the paused clock by `<` expected delay → assert no retry 2; advance past it → assert retry 2 (covers the exponential math, not just the count). **Decode is transient:** a separate case scripts a `Decode` error then ok → assert `RetryScheduled` (blind re-issue), episode proceeds — not `TaskFailed` |
 | 2 | FakeProvider 401 → `Termination::Fatal`, zero retries |
-| 3 | 400, a `Decode` failure (assert exactly one provider call, **no** `RetryScheduled` — proves Decode is not transient), and separately a step-liveness trip → `TaskFailed`, next task still runs |
+| 3 | 400 (and separately a step-liveness trip) → `TaskFailed`, next task still runs |
 | 4 | malformed×2 recovered; ×3 → `TaskFailed(Malformed)`, service continues |
 | 5 | tiny `max_tokens`; advance clock → `Throttle` then resume after reset; `used` zeroed |
 | 6,12 | cancel mid-sleep (cancel before advancing past wake) and mid-decide (pending FakeMind) → `Cancelled` |
