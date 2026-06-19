@@ -2,3 +2,5 @@
 /.cargo
 /result
 .direnv/
+.claude/worktrees/
+.claude/settings.local.*
