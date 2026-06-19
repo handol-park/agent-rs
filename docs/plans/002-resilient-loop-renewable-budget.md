@@ -42,7 +42,7 @@ verbatim: `tool/`, `provider/` (one additive change — `Api` carries `status`).
     async fn decide(&mut self, p: Perception) -> Decision;
     fn budget_summary(&self) -> BudgetSummary;          // read by the spine between decides (goal 12)
 }
-pub enum Perception { NewTask { goal: String }, Observation(Observation) } // Clone; NewTask resets working memory
+pub enum Perception { NewTask { goal: String }, Observation(Observation), Resume } // Clone; NewTask resets memory; Resume = continue after a throttle, no new stimulus (not folded)
 pub enum Command  { CallTool { call_id: String, name: String, input: Value } }
 pub enum Decision { Act(Command), Done(Outcome), Failed(Reason), Throttle(Instant) } // Instant = tokio::time::Instant
 pub enum Reason   { Task(TaskFault), Service(AgentError) }                 // task-fatal vs service-fatal (goal 3)
@@ -77,18 +77,33 @@ impl ProviderError { fn class(&self) -> ErrorClass } // Transient | ServiceFatal
 
 ## ModelMind::decide (goals 2–5)
 
-1. Fold `perception` into working memory (`NewTask` resets it; `Observation`
-   appends a tool/error message).
-2. `budget.refresh(now)`. If `budget.exhausted(now)`: if already throttled once
-   this decide → `Failed(Reason::Task(BudgetTooSmall))` (goal 4); else return
-   `Throttle(budget.next_reset(now))`.
-3. Call the provider inside `tokio::time::timeout(per_call)`. Classify errors
-   (`ProviderError::class`): Transient → `sleep(backoff)` (capped 60s, full
-   jitter), emit `RetryScheduled`, retry **unbounded** (goal 3); ServiceFatal →
-   `Failed(Reason::Service(_))`; TaskFatal → `Failed(Reason::Task(BadRequest))`.
-4. On success: `budget.charge(now, usage)` (saturating). Map response: tool-calls
-   → `Act(CallTool)`; final text → `Done`; **no usable command** → re-prompt,
-   capped at 2 consecutive, then `Failed(Reason::Task(Malformed))` (goal 5).
+`ModelMind` carries a `resuming: bool` flag (cross-`decide` state) so a
+throttle-resume can be distinguished from a fresh stimulus.
+
+1. **Fold the perception once.** `NewTask` resets working memory and folds the
+   goal; `Observation` appends a tool/error message; **`Resume` folds nothing**
+   (the perception that preceded the throttle was already folded in the earlier
+   `decide`). _(Fixes the duplicate-`Observation` bug: a throttle re-decide sends
+   `Resume`, not the original perception, so working memory is never re-appended —
+   for an at-start **or** a mid-decide throttle alike.)_
+2. **Attempt loop** — each iteration may make one provider call:
+   - `budget.refresh(now)`. If `budget.exhausted(now)` **before** a usable
+     decision: if `self.resuming` (a *freshly reset* full window still cannot fund
+     this decision) → `Failed(Reason::Task(BudgetTooSmall))` (goal 4); else set
+     `self.resuming = true` and return `Throttle(budget.next_reset(now))`. _(The
+     flag lives on the struct, so it survives the `Throttle` → sleep → re-`decide`
+     boundary — fixing the unreachable-guard bug; SC 13 now fires when a fresh
+     window re-exhausts.)_
+   - Call the provider inside `tokio::time::timeout(per_call)`. Classify
+     (`ProviderError::class`): Transient → `sleep(backoff)` (capped 60s, full
+     jitter), emit `RetryScheduled`, retry **unbounded** (goal 3); ServiceFatal →
+     `Failed(Reason::Service(_))`; TaskFatal → `Failed(Reason::Task(BadRequest))`.
+   - On success: `budget.charge(now, usage)` (saturating). Map response:
+     tool-calls → `Act(CallTool)`; final text → `Done`; **no usable command** →
+     re-prompt, capped at 2 consecutive, then `Failed(Reason::Task(Malformed))`
+     (goal 5); otherwise loop for the next call.
+3. On returning any **terminal** decision (`Act`/`Done`/`Failed`) clear
+   `self.resuming = false`.
 
 ## The drive loop (`Spine::run` → `Termination`)
 
@@ -114,8 +129,9 @@ arm and the decide future borrow different fields. Then match the Decision:
   **service continues** (goal 10).
 - `Failed(Service(e))` → return `Termination::Fatal(e)` (ends the run).
 - `Throttle(t)` → `lifecycle=Throttling`, emit `ThrottleSleep{wake:t}`,
-  `select!{ cancel → Cancelled, sleep_until(t) → () }`, then re-decide the **same**
-  perception (goal 9). No step consumed.
+  `select!{ cancel → Cancelled, sleep_until(t) → () }`, then re-decide with
+  `Perception::Resume` (goal 9) — **not** the original perception, so the mind
+  does not re-fold it. No step consumed.
 
 ## RunEvent (goal 17)
 

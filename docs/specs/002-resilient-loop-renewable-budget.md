@@ -37,8 +37,10 @@ marked "from 001."
 - **Task** — a unit of work pulled from the inbox: a goal plus optional metadata
   and an optional `oneshot` reply channel for its `TaskOutcome`.
 - **Perception** — the single stimulus passed to `Mind::decide`:
-  `Perception::Task(Task)` on the first decide of an episode (a new goal), or
-  `Perception::Observation(Observation)` on every subsequent decide. The spine
+  `Perception::Task(Task)` on the first decide of an episode (a new goal),
+  `Perception::Observation(Observation)` on a subsequent decide, or
+  `Perception::Resume` after a throttle (continue with the working memory
+  unchanged — **no new stimulus**, so it is not folded; see goal 9). The spine
   passes only the latest stimulus, never the transcript; the mind accumulates
   perceptions into its own working memory. A `Perception::Task` marks a new
   episode and **resets** the mind's working memory.
@@ -136,7 +138,10 @@ marked "from 001."
    consume steps; throttling cannot loop forever because a window too small for
    one decision is task-fatal, goal 4.)_
 9. The Spine **MUST** honor `Decision::Throttle(t)`: suspend the loop and sleep
-   until `t`, then resume the same episode. The sleep **MUST** be cancellable.
+   until `t`, then resume the episode with `Perception::Resume` — the working
+   memory is **not** re-folded, and the mind **MUST** treat a second exhaustion of
+   a freshly-reset window as task-fatal (goal 4), so throttling cannot loop
+   forever. The sleep **MUST** be cancellable.
 10. The Spine **MUST** run perpetually, terminating **only** on: cancellation
     (token) → `Cancelled`; a service-fatal mind error (goal 3) → `Fatal`; or the
     inbox closing (`recv()` returns `None`) → `Stopped`. Task completion or
