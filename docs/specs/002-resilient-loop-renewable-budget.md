@@ -1,4 +1,4 @@
-# Spec 002 — actor agent: mind + spine (v0.2)
+# Spec 002 — actor agent: mind + brainstem (v0.2)
 
 Status: **draft**. Supersedes the architecture and several normative rules of
 [001](001-agent-core.md): the single `Agent::run` loop, the fatal-on-transport
@@ -18,15 +18,15 @@ split into two components:
 - **Mind** — cognition. Abstracts the LLM. Given a perception, decides the next
   command. Owns the provider, the planning translation, working memory, the
   token budget, and LLM-call resilience. Never touches the world.
-- **Spine** — body + runtime. Owns the I/O boundary (a mailbox of incoming
+- **Brainstem** — body + runtime. Owns the I/O boundary (a mailbox of incoming
   tasks), the peripherals (tool registry + execution), the drive loop,
-  cancellation, step-liveness, and event emission. **The spine drives**: it
+  cancellation, step-liveness, and event emission. **The brainstem drives**: it
   senses a task, consults the mind for each decision, actuates commands on
   peripherals, feeds observations back, and repeats until the task ends — then
   pulls the next task. It runs forever until cancelled or a service-fatal error.
 
 The agent reacts to external signals and repeats until cancelled or fatal
-failure. The mind decides *what* to do; the spine decides *when to listen, act,
+failure. The mind decides *what* to do; the brainstem decides *when to listen, act,
 and halt*.
 
 ## Types _(informational)_
@@ -40,14 +40,14 @@ marked "from 001."
   `Perception::Task(Task)` on the first decide of an episode (a new goal),
   `Perception::Observation(Observation)` on a subsequent decide, or
   `Perception::Resume` after a throttle (continue with the working memory
-  unchanged — **no new stimulus**, so it is not folded; see goal 9). The spine
+  unchanged — **no new stimulus**, so it is not folded; see goal 9). The brainstem
   passes only the latest stimulus, never the transcript; the mind accumulates
   perceptions into its own working memory. A `Perception::Task` marks a new
   episode and **resets** the mind's working memory.
-- **Command** — an intention the mind emits for the spine to actuate, e.g.
+- **Command** — an intention the mind emits for the brainstem to actuate, e.g.
   `Command::CallTool { name, input }`. Dispatched through the peripheral registry.
 - **Observation** — the result of actuating a command: a tool result or a
-  recoverable error (mapped from 001's `RecoverableError`), returned by the spine
+  recoverable error (mapped from 001's `RecoverableError`), returned by the brainstem
   and fed back as the next Perception.
 - **Decision** — the output of `Mind::decide`: one of `Act(Command)`,
   `Done(Outcome)`, `Failed(Reason)`, `Throttle(Instant)`.
@@ -56,7 +56,7 @@ marked "from 001."
   **service-fatal**.
 - **TaskOutcome** — `Completed(Outcome)` or `Failed(Reason)`; emitted per task,
   never run-terminal.
-- **Lifecycle** — the spine's run state, reported in a `Snapshot`: `Idle`,
+- **Lifecycle** — the brainstem's run state, reported in a `Snapshot`: `Idle`,
   `Working`, `Throttling`, and the terminal `Cancelled` / `Fatal` / `Stopped`.
 - **Snapshot** — the `Status` reply: `Lifecycle` state, in-flight task, a budget
   summary (tokens remaining + next reset instant) **as of the last completed
@@ -74,7 +74,7 @@ marked "from 001."
    `async fn decide(&mut self, perception: Perception) -> Decision`, where
    `Decision` is one of `Act(Command)`, `Done(Outcome)`, `Failed(Reason)`,
    `Throttle(Instant)`. The mind **MUST** accumulate each `Perception` into its
-   own working memory; the spine **MUST NOT** pass the transcript.
+   own working memory; the brainstem **MUST NOT** pass the transcript.
 2. A model-backed `Mind` **MUST** own the `Provider` (LLM) and map the model's
    native tool-calls into `Command::CallTool` and a final text answer into
    `Decision::Done`. _(This folds 001's `Planner` into the Mind.)_
@@ -89,14 +89,14 @@ marked "from 001."
      **MUST** be bounded by a per-call timeout; a timed-out call is itself a
      transient error (and is retried).
    - **Service-fatal** (HTTP 401, 403, 404 — auth / endpoint-or-model config):
-     return `Failed` flagged service-fatal; the spine **MUST** escalate it to run
+     return `Failed` flagged service-fatal; the brainstem **MUST** escalate it to run
      termination.
    - **Task-fatal** (HTTP 400, 422 — request shaped by this task's content):
-     return `Failed` (task-scoped); the spine fails the task and keeps serving.
+     return `Failed` (task-scoped); the brainstem fails the task and keeps serving.
 4. The Mind **MUST** own a **renewable token budget** (see Budget). When the
    current window's token quota is exhausted, it **MUST** return
    `Decision::Throttle(reset_instant)` rather than `Failed`. The mind **MUST NOT**
-   sleep — it reports the reset instant; the spine controls the wait (goal 9). If
+   sleep — it reports the reset instant; the brainstem controls the wait (goal 9). If
    a single `decide` cannot complete within **one full window's** quota — it
    exhausts a freshly-reset window without producing `Act`, `Done`, or `Failed` —
    the mind **MUST** return a **task-fatal** `Failed` (the decision does not fit
@@ -112,9 +112,9 @@ marked "from 001."
    re-prompt also draws on the token budget.)_ It **MUST NOT** be treated as a
    transient transport retry and **MUST NOT** terminate the service.
 
-### Spine (body + runtime) — the crate MUST…
+### Brainstem (body + runtime) — the crate MUST…
 
-6. **MUST** make the Spine the driver. It **MUST** own:
+6. **MUST** make the Brainstem the driver. It **MUST** own:
    - an **inbox** of incoming `Task`s, modeled as a `tokio::sync::mpsc`
      receiver (the standard tokio actor mailbox) — an in-memory channel for
      tests; real queues adapt by forwarding into the sender;
@@ -137,26 +137,26 @@ marked "from 001."
    internal malformed re-prompts (goal 5) are bounded separately and do not
    consume steps; throttling cannot loop forever because a window too small for
    one decision is task-fatal, goal 4.)_
-9. The Spine **MUST** honor `Decision::Throttle(t)`: suspend the loop and sleep
+9. The Brainstem **MUST** honor `Decision::Throttle(t)`: suspend the loop and sleep
    until `t`, then resume the episode with `Perception::Resume` — the working
    memory is **not** re-folded, and the mind **MUST** treat a second exhaustion of
    a freshly-reset window as task-fatal (goal 4), so throttling cannot loop
    forever. The sleep **MUST** be cancellable.
-10. The Spine **MUST** run perpetually, terminating **only** on: cancellation
+10. The Brainstem **MUST** run perpetually, terminating **only** on: cancellation
     (token) → `Cancelled`; a service-fatal mind error (goal 3) → `Fatal`; or the
     inbox closing (`recv()` returns `None`) → `Stopped`. Task completion or
     failure **MUST NOT** terminate the service. _(Graceful `Shutdown`/drain is out
     of scope; inbox-close is the only `Stopped` path in v0.2.)_
 11. **Cancellation MUST** be honored while a decision or actuation is in flight,
-    not only between them: the spine **MUST** structure its drive loop so the
+    not only between them: the brainstem **MUST** structure its drive loop so the
     cancellation token and the Status query are serviced **concurrently** with the
     in-flight `mind.decide`, actuation, or throttle sleep. Combined with goal 7
     (actuation off the loop), this makes every long operation interruptible.
     Cancellation discards in-flight work and partial task memory. _(informational:
     e.g. a `select!` over the in-flight future, the cancel token, and the Status
     channel; the exact structure is a plan concern.)_
-12. The Spine **MUST** answer a **Status** query (a `oneshot` reply) with a
-    `Snapshot`. The Snapshot **MUST** be built from **spine-owned cached state** —
+12. The Brainstem **MUST** answer a **Status** query (a `oneshot` reply) with a
+    `Snapshot`. The Snapshot **MUST** be built from **brainstem-owned cached state** —
     including a budget summary the mind reports after each decision — and **MUST
     NOT** require borrowing the mind while a `decide` is in flight; its budget
     fields therefore reflect state as of the last completed decision. _(Status is
@@ -191,7 +191,7 @@ The agent reacts to these signals (handling defined above):
 - **inbox closed** (`recv()` returns `None`) → `Stopped`.
 - **Status** (oneshot query) → reply with a `Snapshot`.
 - **token-exhausted** (internal) → the mind returns `Decision::Throttle`; the
-  spine sleeps until the reset instant.
+  brainstem sleeps until the reset instant.
 - **service-fatal error** (internal, from the mind) → `Fatal`.
 
 ### Observability — the crate MUST…
@@ -221,7 +221,7 @@ The agent reacts to these signals (handling defined above):
   `Reconfigure` — recognized as real-actor controls, deferred.
 - Per-tool actuation timeout (sync tools cannot be preempted; cancellation is the
   only interrupt — goals 7, 11).
-- Spine-side retry of flaky peripherals (tool failures stay recoverable
+- Brainstem-side retry of flaky peripherals (tool failures stay recoverable
   observations the mind reasons about, per goal 13).
 - Multi-window budgets; circuit-breakers; human-in-the-loop input beyond
   cancellation (still a future `Tool`, per 001).
@@ -229,7 +229,7 @@ The agent reacts to these signals (handling defined above):
 ## Success criteria
 
 `make check` green, plus deterministic offline tests (a fake `Mind` and a fake
-`Spine`/`Provider`, an injected clock, `tokio::test(start_paused)`) proving:
+`Brainstem`/`Provider`, an injected clock, `tokio::test(start_paused)`) proving:
 
 1. A transient LLM error (503 / dropped connection) → the mind retries with
    backoff, **emitting a retry event per attempt** → the episode proceeds; the
@@ -240,7 +240,7 @@ The agent reacts to these signals (handling defined above):
 4. Two consecutive malformed responses are recovered within cognition and the
    episode continues; a third consecutive malformed response → task-fatal, and
    the service continues (verifies the goal-5 normative cap).
-5. Token-window exhaustion → the mind returns `Throttle` and the spine sleeps
+5. Token-window exhaustion → the mind returns `Throttle` and the brainstem sleeps
    (driven by paused/advanced time) and resumes after the reset, with consumption
    counters reset to zero.
 6. **Cancellation** → `Cancelled`, including mid-episode and mid-sleep.
@@ -271,9 +271,9 @@ tokio actor pattern (`mpsc` inbox + `oneshot` replies +
 `tokio_util::sync::CancellationToken`); an injectable clock backed by
 `tokio::time` so all time-dependent logic stays unit-testable under
 `start_paused`; in-crate exponential-backoff math (no new dependency); **no date
-library** (fixed-from-start windows). `Mind` and `Spine` are `#[async_trait]`
+library** (fixed-from-start windows). `Mind` and `Brainstem` are `#[async_trait]`
 trait objects for runtime dispatch; peripherals (tools) stay sync and actuate on
-a blocking thread (goal 7). Fake `Mind` / fake `Spine` for tests, mirroring 001's
+a blocking thread (goal 7). Fake `Mind` / fake `Brainstem` for tests, mirroring 001's
 `FakeProvider`.
 
 ## Open questions _(informational)_

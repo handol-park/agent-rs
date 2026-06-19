@@ -1,4 +1,4 @@
-# Plan 002 — actor agent: mind + spine (v0.2)
+# Plan 002 — actor agent: mind + brainstem (v0.2)
 
 Implementation plan for [Spec 002](../specs/002-resilient-loop-renewable-budget.md).
 _(informational unless quoting a spec MUST. Goal numbers below refer to that spec.)_
@@ -14,24 +14,24 @@ injectable so tests are deterministic. **No date library** — time is
 ## Module map
 
 ```
-src/lib.rs              re-exports; Spine entry; Termination
+src/lib.rs              re-exports; Brainstem entry; Termination
 src/mind/mod.rs         Mind trait; Perception, Command, Decision, Outcome, Reason, TaskFault
 src/mind/model.rs       ModelMind: owns Box<dyn Provider> + working memory + Budget; classify/retry/backoff; malformed cap; throttle
-src/mind/fake.rs        FakeMind (scripted Decisions) for spine tests
-src/spine/mod.rs        Spine, run loop (select!/pin/spawn_blocking), Snapshot, Lifecycle, SpineState, Termination
+src/mind/fake.rs        FakeMind (scripted Decisions) for brainstem tests
+src/brainstem/mod.rs    Brainstem, run loop (select!/pin/spawn_blocking), Snapshot, Lifecycle, BrainstemState, Termination
 src/observation.rs      Observation, Outcome, TaskOutcome
 src/budget.rs           Period, Budget, BudgetState (renewable window; pure fns; saturating)
 src/event.rs            RunEvent (extended for v0.2 paths)
 src/error.rs            ProviderError { Transport, Api{status,body}, Decode }, AgentError, classification
 src/tool/…              from 001: Tool (sync), ToolRegistry (now Arc + Send+Sync), builtins
 src/provider/…          from 001: Provider, OpenAiProvider, FakeProvider (Api now carries HTTP status)
-examples/service.rs     perpetual service: spawn Spine, feed Tasks via inbox, cancel
+examples/service.rs     perpetual service: spawn Brainstem, feed Tasks via inbox, cancel
 tests/actor_loop.rs     integration: the success-criteria scenarios end-to-end
 ```
 
 Replaced from 001: `planner/` is folded into `mind/`; `action.rs` →
 `Command`/`Decision`/`Observation`; the old `Budget`/`TerminalReason` →
-renewable `Budget` + `Termination`; `Agent::run` → `Spine::run`. Reused
+renewable `Budget` + `Termination`; `Agent::run` → `Brainstem::run`. Reused
 verbatim: `tool/`, `provider/` (one additive change — `Api` carries `status`).
 
 ## Core contracts
@@ -40,7 +40,7 @@ verbatim: `tool/`, `provider/` (one additive change — `Api` carries `status`).
 // mind/mod.rs
 #[async_trait] pub trait Mind: Send {
     async fn decide(&mut self, p: Perception) -> Decision;
-    fn budget_summary(&self) -> BudgetSummary;          // read by the spine between decides (goal 12)
+    fn budget_summary(&self) -> BudgetSummary;          // read by the brainstem between decides (goal 12)
 }
 pub enum Perception { NewTask { goal: String }, Observation(Observation), Resume } // Clone; NewTask resets memory; Resume = continue after a throttle, no new stimulus (not folded)
 pub enum Command  { CallTool { call_id: String, name: String, input: Value } }
@@ -54,13 +54,13 @@ pub enum Observation { ToolResult { call_id: String, output: Value }, Recoverabl
 pub struct Outcome { pub message: String }
 pub enum TaskOutcome { Completed(Outcome), Failed(TaskFault) }            // sent on Task.reply
 
-// spine/mod.rs
+// brainstem/mod.rs
 pub struct Task { pub goal: String, pub reply: Option<oneshot::Sender<TaskOutcome>> }
 pub enum Lifecycle { Idle, Working, Throttling, Cancelled, Fatal, Stopped }
 pub struct Snapshot { pub lifecycle: Lifecycle, pub current_task: Option<String>,
                       pub tokens_remaining: u64, pub next_reset: Instant,
                       pub queue_depth: usize, pub steps_used: usize }
-pub enum Termination { Cancelled, Fatal(AgentError), Stopped }           // run-level result of Spine::run
+pub enum Termination { Cancelled, Fatal(AgentError), Stopped }           // run-level result of Brainstem::run
 
 // budget.rs — pure fns of injected `now` (goal 15)
 pub enum Period { Daily, Weekly, Every(Duration) }                       // Daily=24h, Weekly=7d
@@ -105,13 +105,13 @@ throttle-resume can be distinguished from a fresh stimulus.
 3. On returning any **terminal** decision (`Act`/`Done`/`Failed`) clear
    `self.resuming = false`.
 
-## The drive loop (`Spine::run` → `Termination`)
+## The drive loop (`Brainstem::run` → `Termination`)
 
 Outer (idle) `select!` over `{ cancel.cancelled() → Cancelled, status_rx →
 reply(snapshot), inbox.recv() → Some(task)=episode / None → Stopped }`.
 
 `run_episode(task)`: `lifecycle=Working`, `steps=0`, `perception=NewTask`.
-Per turn: **refresh the cached `Snapshot`** (from `SpineState` + `mind.budget_summary()`,
+Per turn: **refresh the cached `Snapshot`** (from `BrainstemState` + `mind.budget_summary()`,
 called while no decide borrow is held — goal 12); `tokio::pin!` the
 `mind.decide(perception.clone())` future; loop a `biased` `select!` over
 `{ cancel → return Cancelled, status_rx → reply(cached snapshot) and keep
@@ -163,13 +163,13 @@ arm and the decide future borrow different fields. Then match the Decision:
 - **P2** `error.rs` classification + `ProviderError::Api{status}` + `provider/` update + tests.
 - **P3** `mind/` types + `Mind` trait + `observation.rs` + `FakeMind` + tests.
 - **P4** `mind/model.rs` `ModelMind` (decide, classify/retry/backoff, malformed cap, throttle, BudgetTooSmall) + unit tests (`FakeProvider`, `start_paused`).
-- **P5** `spine/` `Spine::run` (idle/episode `select!`, pinned decide, `spawn_blocking` actuate, cancel, status, throttle) + `event.rs` + unit tests (`FakeMind`).
+- **P5** `brainstem/` `Brainstem::run` (idle/episode `select!`, pinned decide, `spawn_blocking` actuate, cancel, status, throttle) + `event.rs` + unit tests (`FakeMind`).
 - **P6** `tests/actor_loop.rs` (SC 1–13) + `examples/service.rs`.
 - **P7** `make check` green; update AGENTS.md module map + CLAUDE.md architecture.
 
 ## Decisions
 
-- `Mind`/`Spine` are `#[async_trait]` trait objects (runtime dispatch, mirroring
+- `Mind`/`Brainstem` are `#[async_trait]` trait objects (runtime dispatch, mirroring
   001's `Provider`/`Planner`). `Tool` stays sync; `ToolRegistry` becomes
   `Arc`-shared + `Send+Sync` for `spawn_blocking`.
 - Time is `tokio::time::Instant`; `Budget` methods take `now` as a parameter
