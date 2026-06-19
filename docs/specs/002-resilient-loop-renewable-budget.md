@@ -44,8 +44,9 @@ marked "from 001."
   episode and **resets** the mind's working memory.
 - **Command** — an intention the mind emits for the spine to actuate, e.g.
   `Command::CallTool { name, input }`. Dispatched through the peripheral registry.
-- **Observation** — the result of actuating a command (a tool result or a
-  recoverable error), returned by the spine and fed back as the next Perception.
+- **Observation** — the result of actuating a command: a tool result or a
+  recoverable error (mapped from 001's `RecoverableError`), returned by the spine
+  and fed back as the next Perception.
 - **Decision** — the output of `Mind::decide`: one of `Act(Command)`,
   `Done(Outcome)`, `Failed(Reason)`, `Throttle(Instant)`.
 - **Outcome** — a successful task result (the final answer text or data).
@@ -53,8 +54,11 @@ marked "from 001."
   **service-fatal**.
 - **TaskOutcome** — `Completed(Outcome)` or `Failed(Reason)`; emitted per task,
   never run-terminal.
-- **Snapshot** — the `Status` reply: lifecycle state, in-flight task, tokens
-  remaining + next reset instant, queue depth, steps used this task.
+- **Lifecycle** — the spine's run state, reported in a `Snapshot`: `Idle`,
+  `Working`, `Throttling`, and the terminal `Cancelled` / `Fatal` / `Stopped`.
+- **Snapshot** — the `Status` reply: `Lifecycle` state, in-flight task, a budget
+  summary (tokens remaining + next reset instant) **as of the last completed
+  decision**, queue depth, and steps used this task.
 - **From 001, surviving:** `Provider` (LLM transport), `Tool` / `ToolRegistry`
   (peripherals; sync), `RunEvent` (extended by goal 17), `RecoverableError`.
   001's `Planner` is absorbed into the `Mind`; 001's `Agent::run` and per-run
@@ -90,7 +94,12 @@ marked "from 001."
 4. The Mind **MUST** own a **renewable token budget** (see Budget). When the
    current window's token quota is exhausted, it **MUST** return
    `Decision::Throttle(reset_instant)` rather than `Failed`. The mind **MUST NOT**
-   sleep — it reports the reset instant; the spine controls the wait (goal 9).
+   sleep — it reports the reset instant; the spine controls the wait (goal 9). If
+   a single `decide` cannot complete within **one full window's** quota — it
+   exhausts a freshly-reset window without producing `Act`, `Done`, or `Failed` —
+   the mind **MUST** return a **task-fatal** `Failed` (the decision does not fit
+   the budget) rather than throttling again. _(This bounds throttling and prevents
+   an exhausted episode from sleeping forever.)_
 5. **Malformed model output** — a response yielding no valid command (neither
    text nor tool calls, or unparseable arguments) — **MUST** be treated as a
    recoverable cognitive condition: the Mind re-prompts the model with the error
@@ -114,11 +123,9 @@ marked "from 001."
    peripheral and pass the resulting `Observation` back as
    `Perception::Observation`; on `Throttle(t)` wait until `t` (goal 9) and
    continue the same episode; on `Done`/`Failed` end the episode — then emit the
-   `TaskOutcome` and pull the next task. _(informational: tool actuation is
-   synchronous and is NOT individually timeout-bounded — a hung tool is
-   interruptible only by cancellation (goal 11); the cognition side is bounded by
-   the per-call provider timeout of goal 3. A preemptible-tool timeout is out of
-   scope, since 001's `Tool` is sync and cannot be cancelled mid-call.)_
+   `TaskOutcome` and pull the next task. Because 001's `Tool` is synchronous, tool
+   actuation **MUST** run off the drive loop's task (on a blocking thread) so a
+   long tool call cannot block cancellation or Status handling (goal 11).
 8. A task episode **MUST** be bounded by a per-task **step-liveness** budget
    (`max_steps`, fresh each task, never time-reset), counted per `mind.decide`
    that returns `Act`. Exceeding it ends the episode as a task-fatal
@@ -126,7 +133,8 @@ marked "from 001."
    service and **MUST NOT** sleep-and-resume. _(Its cause is non-convergence, not
    resource consumption — fundamentally unlike the token budget. The mind's
    internal malformed re-prompts (goal 5) are bounded separately and do not
-   consume steps.)_
+   consume steps; throttling cannot loop forever because a window too small for
+   one decision is task-fatal, goal 4.)_
 9. The Spine **MUST** honor `Decision::Throttle(t)`: suspend the loop and sleep
    until `t`, then resume the same episode. The sleep **MUST** be cancellable.
 10. The Spine **MUST** run perpetually, terminating **only** on: cancellation
@@ -134,13 +142,21 @@ marked "from 001."
     inbox closing (`recv()` returns `None`) → `Stopped`. Task completion or
     failure **MUST NOT** terminate the service. _(Graceful `Shutdown`/drain is out
     of scope; inbox-close is the only `Stopped` path in v0.2.)_
-11. **Cancellation MUST** be honored at any await — mid-decide, mid-actuate,
-    mid-sleep — promptly aborting in-flight work; partial task memory is
-    discarded.
+11. **Cancellation MUST** be honored while a decision or actuation is in flight,
+    not only between them: the spine **MUST** structure its drive loop so the
+    cancellation token and the Status query are serviced **concurrently** with the
+    in-flight `mind.decide`, actuation, or throttle sleep. Combined with goal 7
+    (actuation off the loop), this makes every long operation interruptible.
+    Cancellation discards in-flight work and partial task memory. _(informational:
+    e.g. a `select!` over the in-flight future, the cancel token, and the Status
+    channel; the exact structure is a plan concern.)_
 12. The Spine **MUST** answer a **Status** query (a `oneshot` reply) with a
-    `Snapshot`: lifecycle state, in-flight task, tokens remaining + next reset,
-    queue depth, steps used this task. _(Status is in the v0.2 MVP: a perpetual
-    service must be observable — a stated project value.)_
+    `Snapshot`. The Snapshot **MUST** be built from **spine-owned cached state** —
+    including a budget summary the mind reports after each decision — and **MUST
+    NOT** require borrowing the mind while a `decide` is in flight; its budget
+    fields therefore reflect state as of the last completed decision. _(Status is
+    in the v0.2 MVP: a perpetual service must be observable — a stated project
+    value.)_
 13. **No command-specific branching** in the drive loop: commands dispatch
     through the peripheral registry (001's rule, preserved). An unknown
     command/peripheral becomes a recoverable `Observation`, not a fatal error.
@@ -154,7 +170,10 @@ marked "from 001."
     token-bucket continuous refill are out of scope (see below).
 15. The quota check **MUST** be a **pure function of injected time and
     consumption state** (preserving 001's testability); crossing a window
-    boundary **MUST** reset that window's consumption to zero.
+    boundary **MUST** reset that window's consumption to zero. Consumption **MUST**
+    be sampled **per provider call** and charged against the window current when
+    that call completes; if a single decision's calls straddle a reset, the later
+    calls count against the new window.
 16. `max_steps` **MUST** be modeled separately from the token budget — it is the
     per-task liveness bound of goal 8, not a windowed resource quota.
 
@@ -177,6 +196,14 @@ The agent reacts to these signals (handling defined above):
     token-window reset, throttle-sleep (with wake time), and run termination
     (`Cancelled` / `Fatal` / `Stopped`).
 
+### Determinism — the crate MUST…
+
+18. All time-dependent waits — backoff, the per-call provider timeout, and the
+    throttle sleep — and the budget-window clock **MUST** use `tokio::time`, so
+    every time-dependent MUST is deterministic under `tokio::test(start_paused)`.
+    The injectable clock **MUST** be backed by `tokio::time::Instant`; no MUST may
+    depend on real wall-clock.
+
 ## Out of scope for v0.2 — MUST NOT block it
 
 - **Persistence** of budget-window state and agent memory across restarts →
@@ -188,7 +215,7 @@ The agent reacts to these signals (handling defined above):
 - Control signals beyond `Status`: `Shutdown{drain}`, `Pause`/`Resume`,
   `Reconfigure` — recognized as real-actor controls, deferred.
 - Per-tool actuation timeout (sync tools cannot be preempted; cancellation is the
-  only interrupt — goal 7).
+  only interrupt — goals 7, 11).
 - Spine-side retry of flaky peripherals (tool failures stay recoverable
   observations the mind reasons about, per goal 13).
 - Multi-window budgets; circuit-breakers; human-in-the-loop input beyond
@@ -226,15 +253,22 @@ The agent reacts to these signals (handling defined above):
     task-received, command, command-result, retry-scheduled, throttle-sleep,
     task-completed/failed, and the terminal reason — asserted within the tests
     above.
+12. Cancellation honored **mid-decide**: cancelling while a `decide` future is in
+    flight terminates `Cancelled`; because actuation runs off the loop (goal 7), a
+    cancel during a tool call is likewise observed.
+13. A window whose `max_tokens` is smaller than a single decision's cost → that
+    decision returns task-fatal `Failed` and the service continues (verifies
+    goal 4's no-deadlock rule).
 
 ## Stack _(informational)_
 
 tokio actor pattern (`mpsc` inbox + `oneshot` replies +
-`tokio_util::sync::CancellationToken`); an injectable clock so all
-time-dependent logic stays unit-testable; in-crate exponential-backoff math (no
-new dependency); **no date library** (fixed-from-start windows). `Mind` and
-`Spine` are `#[async_trait]` trait objects for runtime dispatch; peripherals
-(tools) stay sync. Fake `Mind` / fake `Spine` for tests, mirroring 001's
+`tokio_util::sync::CancellationToken`); an injectable clock backed by
+`tokio::time` so all time-dependent logic stays unit-testable under
+`start_paused`; in-crate exponential-backoff math (no new dependency); **no date
+library** (fixed-from-start windows). `Mind` and `Spine` are `#[async_trait]`
+trait objects for runtime dispatch; peripherals (tools) stay sync and actuate on
+a blocking thread (goal 7). Fake `Mind` / fake `Spine` for tests, mirroring 001's
 `FakeProvider`.
 
 ## Open questions _(informational)_
