@@ -87,12 +87,19 @@ marked "from 001."
      error — never on a transient one. The retry events and `Status` (goal 12)
      keep a persistently-failing provider observable. A single provider call
      **MUST** be bounded by a per-call timeout; a timed-out call is itself a
-     transient error (and is retried).
+     transient error (and is retried). _(informational: a `Retry-After` header on
+     429 / 503 is ignored in v0.2 — fixed exponential backoff is used regardless;
+     honoring it is a future refinement, noted so it is not silently added later.)_
    - **Service-fatal** (HTTP 401, 403, 404 — auth / endpoint-or-model config):
      return `Failed` flagged service-fatal; the brainstem **MUST** escalate it to run
      termination.
    - **Task-fatal** (HTTP 400, 422 — request shaped by this task's content):
      return `Failed` (task-scoped); the brainstem fails the task and keeps serving.
+   - **Unclassified status** — classification **MUST** be total (no provider
+     response unhandled): any **5xx** not listed above **MUST** be transient
+     (server-side, may self-heal); every **other** unlisted status (unlisted 4xx,
+     and any 1xx/3xx surfaced as an error) **MUST** be task-fatal (the service does
+     not blindly retry a request the server actively rejected).
 4. The Mind **MUST** own a **renewable token budget** (see Budget). When the
    current window's token quota is exhausted, it **MUST** return
    `Decision::Throttle(reset_instant)` rather than `Failed`. The mind **MUST NOT**
@@ -233,7 +240,11 @@ The agent reacts to these signals (handling defined above):
 
 1. A transient LLM error (503 / dropped connection) → the mind retries with
    backoff, **emitting a retry event per attempt** → the episode proceeds; the
-   service never terminates.
+   service never terminates. _Determinism:_ because the clock is paused, the test
+   **MUST** also assert the backoff is **exponential** — after retry attempt *N*,
+   advancing the clock by **less than** the expected delay yields no further
+   attempt, and advancing past it yields the next — so the timing math is covered,
+   not just the event count.
 2. A service-fatal error (401) → the run terminates `Fatal`, with no retry.
 3. A task-fatal error (400, or a step-liveness trip) → the task fails and the
    **service continues** to the next task.
@@ -255,15 +266,21 @@ The agent reacts to these signals (handling defined above):
 10. An **unknown command** yields a recoverable `Observation` and the episode
     continues (verifies goal 13's registry dispatch with no command-branching).
 11. The documented `RunEvent`s (goal 17) are emitted on their paths — at minimum
-    task-received, command, command-result, retry-scheduled, throttle-sleep,
-    task-completed/failed, and the terminal reason — asserted within the tests
-    above.
+    task-received, command, command-result, **recoverable-observation**,
+    retry-scheduled, **window-reset**, throttle-sleep, task-completed/failed, and
+    the terminal reason — asserted within the tests above. _(The window-reset path
+    is exercised by SC 5 and the recoverable-observation path by SC 10.)_
 12. Cancellation honored **mid-decide**: cancelling while a `decide` future is in
     flight terminates `Cancelled`; because actuation runs off the loop (goal 7), a
     cancel during a tool call is likewise observed.
 13. A window whose `max_tokens` is smaller than a single decision's cost → that
     decision returns task-fatal `Failed` and the service continues (verifies
-    goal 4's no-deadlock rule).
+    goal 4's no-deadlock rule). The test **MUST** assert the **intermediate
+    `Throttle`** first — initial `decide` returns `Throttle`, a `ThrottleSleep`
+    event is emitted, the clock is advanced past the reset, and only the
+    `decide(Resume)` against the freshly-reset-but-still-too-small window returns
+    task-fatal — so an implementation that skips the throttle and fails on first
+    exhaustion (violating goal 4's wait-then-decide order) is rejected.
 
 ## Stack _(informational)_
 

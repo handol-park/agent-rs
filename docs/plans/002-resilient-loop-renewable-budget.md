@@ -16,7 +16,7 @@ injectable so tests are deterministic. **No date library** — time is
 ```
 src/lib.rs              re-exports; Brainstem entry; Termination
 src/mind/mod.rs         Mind trait; Perception, Command, Decision, Outcome, Reason, TaskFault
-src/mind/model.rs       ModelMind: owns Box<dyn Provider> + working memory + Budget; classify/retry/backoff; malformed cap; throttle
+src/mind/model.rs       ModelMind: owns Box<dyn Provider> + working memory + Budget + mpsc::Sender<RunEvent>; classify/retry/backoff; malformed cap; throttle
 src/mind/fake.rs        FakeMind (scripted Decisions) for brainstem tests
 src/brainstem/mod.rs    Brainstem, run loop (select!/pin/spawn_blocking), Snapshot, Lifecycle, BrainstemState, Termination
 src/observation.rs      Observation, Outcome, TaskOutcome
@@ -72,7 +72,10 @@ pub struct BudgetState { start: Instant, window: u64, used: u64 }
 
 // error.rs — classification drives goal 3
 impl ProviderError { fn class(&self) -> ErrorClass } // Transient | ServiceFatal | TaskFatal
-//  Transport|Decode|Api{429,5xx} -> Transient ; Api{401,403,404} -> ServiceFatal ; Api{400,422} -> TaskFatal
+//  Transport|Decode|Api{429, any 5xx} -> Transient ; Api{401,403,404} -> ServiceFatal ;
+//  Api{400,422} -> TaskFatal ; `_` (any other status: unlisted 4xx / 1xx / 3xx) -> TaskFatal
+//  — classification is TOTAL (goal 3 "Unclassified status"): the match has a `_` arm, no
+//  ProviderError is unhandled. 5xx is a range match, not the literal 500/503.
 ```
 
 ## ModelMind::decide (goals 2–5)
@@ -80,14 +83,29 @@ impl ProviderError { fn class(&self) -> ErrorClass } // Transient | ServiceFatal
 `ModelMind` carries a `resuming: bool` flag (cross-`decide` state) so a
 throttle-resume can be distinguished from a fresh stimulus.
 
-1. **Fold the perception once.** `NewTask` resets working memory and folds the
-   goal; `Observation` appends a tool/error message; **`Resume` folds nothing**
+**Event emission (goal 17).** Cognitive events that fire *inside* a `decide` —
+`RetryScheduled` (per transient retry) and `WindowReset` (per budget window
+crossing) — are sent through an `mpsc::Sender<RunEvent>` **injected at
+construction**, not returned from `decide`. _(Chosen over accumulating a `Vec`
+drained by the brainstem after `decide`: the attempt loop can retry-sleep for a
+long time, and the whole point of `RetryScheduled` is to make a stuck provider
+observable **while** `decide` is still blocked. A drained-`Vec` design would hide
+those events until the call returns.)_ The brainstem emits every other `RunEvent`
+(task lifecycle, command/result, throttle-sleep, terminal); both ends are
+producers on the same channel (`mpsc` is multi-producer).
+
+1. **Fold the perception once.** `NewTask` resets working memory **and clears
+   `self.resuming = false`** (defensive: makes "no `NewTask` arrives while
+   `resuming`" self-enforcing rather than relying on the drive loop never sending
+   one — costs nothing, removes a latent bug class if the loop changes); folds the
+   goal. `Observation` appends a tool/error message; **`Resume` folds nothing**
    (the perception that preceded the throttle was already folded in the earlier
    `decide`). _(Fixes the duplicate-`Observation` bug: a throttle re-decide sends
    `Resume`, not the original perception, so working memory is never re-appended —
    for an at-start **or** a mid-decide throttle alike.)_
 2. **Attempt loop** — each iteration may make one provider call:
-   - `budget.refresh(now)`. If `budget.exhausted(now)` **before** a usable
+   - `budget.refresh(now)` — if it rolled the window, emit `WindowReset{window}`.
+     If `budget.exhausted(now)` **before** a usable
      decision: if `self.resuming` (a *freshly reset* full window still cannot fund
      this decision) → `Failed(Reason::Task(BudgetTooSmall))` (goal 4); else set
      `self.resuming = true` and return `Throttle(budget.next_reset(now))`. _(The
@@ -144,7 +162,7 @@ arm and the decide future borrow different fields. Then match the Decision:
 
 | SC | Test |
 |----|------|
-| 1 | FakeProvider scripts 503×2 then ok → assert `RetryScheduled`×2, episode proceeds, no Termination |
+| 1 | FakeProvider scripts 503×2 then ok → assert `RetryScheduled`×2, episode proceeds, no Termination. **Backoff timing:** after retry 1, advance the paused clock by `<` expected delay → assert no retry 2; advance past it → assert retry 2 (covers the exponential math, not just the count) |
 | 2 | FakeProvider 401 → `Termination::Fatal`, zero retries |
 | 3 | 400 (and separately a step-liveness trip) → `TaskFailed`, next task still runs |
 | 4 | malformed×2 recovered; ×3 → `TaskFailed(Malformed)`, service continues |
@@ -154,8 +172,8 @@ arm and the decide future borrow different fields. Then match the Decision:
 | 8 | drop all inbox senders → `Stopped` |
 | 9 | Status query during Working → `Snapshot` with expected lifecycle/tokens/steps |
 | 10 | command for an unregistered tool → `Observation::Recoverable`, episode continues |
-| 11 | assert the event set is emitted across the above |
-| 13 | `max_tokens` < one decide cost → `TaskFailed(BudgetTooSmall)`, service continues |
+| 11 | assert the event set is emitted across the above — **including** `WindowReset` (from SC 5's window roll) and `Recovered` (from SC 10's unknown tool), plus task-received/command/command-result/retry-scheduled/throttle-sleep/task-completed/failed/terminal |
+| 13 | `max_tokens` < one decide cost → assert **first** `decide` returns `Throttle` + `ThrottleSleep` emitted; advance clock past reset; **then** `decide(Resume)` against the still-too-small fresh window → `TaskFailed(BudgetTooSmall)`; service continues. (Asserting the intermediate `Throttle` rejects an impl that fails on first exhaustion, skipping the wait — goal 4 order.) |
 
 ## Build order (commit per phase)
 
