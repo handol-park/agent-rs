@@ -11,6 +11,7 @@ use crate::event::RunEvent;
 use crate::mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
 use crate::observation::{Observation, Outcome};
 use crate::provider::{Message, ModelRequest, Provider};
+use crate::tool::ToolSchema;
 
 /// A model-backed Mind that owns the provider, budget, working memory, and retry logic.
 pub struct ModelMind {
@@ -23,6 +24,7 @@ pub struct ModelMind {
     resuming: bool,
     malformed_count: usize,
     backoff_seed: u64,
+    tools: Vec<ToolSchema>,
 }
 
 impl ModelMind {
@@ -42,6 +44,7 @@ impl ModelMind {
             resuming: false,
             malformed_count: 0,
             backoff_seed: 12345, // Fixed seed for deterministic tests
+            tools: Vec::new(),
         }
     }
 
@@ -99,7 +102,7 @@ impl ModelMind {
             let request = ModelRequest {
                 system: "You are a helpful assistant.".to_string(),
                 messages: self.working_memory.clone(),
-                tools: Vec::new(), // TODO: pass tool schemas
+                tools: self.tools.clone(),
             };
 
             // A timed-out call is itself a transient error (spec goal 3): flatten the
@@ -248,6 +251,10 @@ impl Mind for ModelMind {
 
     fn set_event_sink(&mut self, events: UnboundedSender<RunEvent>) {
         self.event_tx = events;
+    }
+
+    fn set_tools(&mut self, tools: Vec<ToolSchema>) {
+        self.tools = tools;
     }
 }
 
