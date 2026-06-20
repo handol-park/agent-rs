@@ -7,19 +7,29 @@
 //! planner land in subsequent phases.
 
 pub mod action;
+pub mod brainstem;
 pub mod budget;
 pub mod error;
 pub mod event;
 pub mod memory;
+pub mod mind;
+pub mod observation;
 pub mod planner;
 pub mod provider;
 pub mod tool;
 
 pub use action::{Action, ActionOutcome, RecoverableError};
+pub use brainstem::{Brainstem, Lifecycle, Snapshot, Task};
 pub use budget::{Budget, TerminalReason};
+pub use budget::{BudgetState, BudgetSummary, Period, RenewableBudget};
+pub use error::ErrorClass;
 pub use error::{AgentError, PlannerError, ProviderError, ToolError};
-pub use event::RunEvent;
+pub use event::{RunEvent, Termination};
 pub use memory::{Memory, MemorySnapshot, Record};
+pub use mind::fake::FakeMind;
+pub use mind::model::ModelMind;
+pub use mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
+pub use observation::{Observation, Outcome, TaskOutcome};
 pub use planner::{model::ModelPlanner, rule::RulePlanner};
 pub use planner::{PlanContext, PlanOutput, Planner};
 pub use provider::{fake::FakeProvider, openai::OpenAiProvider};

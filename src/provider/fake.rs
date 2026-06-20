@@ -3,7 +3,7 @@
 //! was given so tests can assert on what the loop sent.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -13,7 +13,7 @@ use crate::error::ProviderError;
 /// A provider that replays a fixed script of responses.
 pub struct FakeProvider {
     responses: Mutex<VecDeque<Result<ModelResponse, ProviderError>>>,
-    seen: Mutex<Vec<ModelRequest>>,
+    seen: Arc<Mutex<Vec<ModelRequest>>>,
 }
 
 impl FakeProvider {
@@ -21,13 +21,19 @@ impl FakeProvider {
     pub fn new(responses: Vec<Result<ModelResponse, ProviderError>>) -> Self {
         Self {
             responses: Mutex::new(responses.into()),
-            seen: Mutex::new(Vec::new()),
+            seen: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// The requests this provider has received so far, in order.
     pub fn requests(&self) -> Vec<ModelRequest> {
         self.seen.lock().expect("not poisoned").clone()
+    }
+
+    /// A shared handle to the recorded requests, so a test can inspect them
+    /// after the provider has been moved into a `Mind`/`Brainstem`.
+    pub fn requests_handle(&self) -> Arc<Mutex<Vec<ModelRequest>>> {
+        Arc::clone(&self.seen)
     }
 }
 
@@ -42,7 +48,12 @@ impl Provider for FakeProvider {
             .lock()
             .expect("not poisoned")
             .pop_front()
-            .unwrap_or_else(|| Err(ProviderError::Api("FakeProvider script exhausted".into())))
+            .unwrap_or_else(|| {
+                Err(ProviderError::Api {
+                    status: 500,
+                    body: "FakeProvider script exhausted".into(),
+                })
+            })
     }
 }
 
