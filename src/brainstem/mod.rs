@@ -369,7 +369,9 @@ impl Brainstem {
         cancel: CancellationToken,
         event_tx: mpsc::UnboundedSender<RunEvent>,
     ) -> tokio::task::JoinHandle<Termination> {
-        let brainstem = Brainstem::new(mind, registry, max_steps, inbox, status_rx, cancel, event_tx);
+        let brainstem = Brainstem::new(
+            mind, registry, max_steps, inbox, status_rx, cancel, event_tx,
+        );
         tokio::spawn(async move { brainstem.run().await })
     }
 }

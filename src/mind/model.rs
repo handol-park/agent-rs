@@ -357,6 +357,7 @@ mod tests {
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 impl ModelMind {
     /// Set the backoff jitter seed for deterministic tests.
     pub fn with_jitter_seed(mut self, seed: u64) -> Self {

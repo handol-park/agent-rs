@@ -34,6 +34,17 @@ impl FakeMind {
             },
         )
     }
+
+    /// Create a FakeMind with default budget summary (for simple tests).
+    pub fn with_script_only(script: Vec<Decision>) -> Self {
+        Self::with_script(script)
+    }
+
+    /// Create a FakeMind that never completes decide (for cancellation tests).
+    /// Returns an empty script that will panic when decide is called.
+    pub fn pending() -> Self {
+        Self::with_script(Vec::new())
+    }
 }
 
 #[async_trait]

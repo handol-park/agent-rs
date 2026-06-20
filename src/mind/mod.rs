@@ -70,7 +70,7 @@ pub enum TaskFault {
 
 /// The Mind trait: given a perception, decide the next action.
 #[async_trait]
-pub trait Mind: Send {
+pub trait Mind: Send + Sync {
     /// Decide the next action given a perception. Accumulates perceptions into
     /// working memory (NewTask resets; Observation appends; Resume does not fold).
     async fn decide(&mut self, perception: Perception) -> Decision;

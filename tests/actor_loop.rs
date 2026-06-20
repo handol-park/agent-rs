@@ -18,7 +18,7 @@
 //!   through the injected event sender. `with_jitter_seed(u64)` fixes the PRNG so
 //!   backoff delays are exactly `base * mult^n` (zero jitter) for SC-1 timing.
 //! * `FakeMind` — a scripted `Mind` for brainstem-mechanics tests.
-//!   `FakeMind::new(Vec<Decision>)` replays decisions in order;
+//!   `FakeMind::with_script_only(Vec<Decision>)` replays decisions in order;
 //!   `FakeMind::pending()` yields a `decide` future that never resolves (for the
 //!   mid-decide cancellation test, SC 12). It reports a `BudgetSummary` so
 //!   `Status` works.
@@ -35,9 +35,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent::{
-    Budget, Command, Decision, FakeMind, FakeProvider, Lifecycle, Mind, ModelMind, ModelResponse,
-    Observation, Outcome, Perception, Period, ProviderError, Reason, RecoverableError, RunEvent,
-    Snapshot, Task, TaskFault, TaskOutcome, Termination, ToolError, ToolRegistry,
+    Command, Decision, FakeMind, FakeProvider, Lifecycle, Mind, ModelMind, ModelResponse,
+    Observation, Outcome, Perception, Period, ProviderError, Reason, RecoverableError,
+    RenewableBudget, RunEvent, Snapshot, Task, TaskFault, TaskOutcome, Termination, ToolError,
+    ToolRegistry,
 };
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
@@ -110,11 +111,11 @@ fn spawn(cfg: BrainstemConfig) -> BrainstemHandle {
 
 fn model_mind(
     script: Vec<Result<ModelResponse, ProviderError>>,
-    budget: Budget,
+    budget: RenewableBudget,
 ) -> (Box<dyn Mind>, mpsc::UnboundedReceiver<RunEvent>) {
     let provider = FakeProvider::new(script);
     let (cog_tx, cog_rx) = mpsc::unbounded_channel::<RunEvent>();
-    let mind = ModelMind::new(Box::new(provider), budget, cog_tx);
+    let mind = ModelMind::new(Box::new(provider), budget, cog_tx, Duration::from_secs(30));
     (Box::new(mind), cog_rx)
 }
 
@@ -124,8 +125,8 @@ fn registry() -> Arc<ToolRegistry> {
 
 /// A budget that funds many tokens over a long window — out of the way for tests
 /// that don't exercise throttling.
-fn ample_budget() -> Budget {
-    Budget {
+fn ample_budget() -> RenewableBudget {
+    RenewableBudget {
         period: Period::Every(Duration::from_secs(3600)),
         max_tokens: 1_000_000,
     }
@@ -177,7 +178,7 @@ async fn sc1_transient_503_retries_with_backoff_then_proceeds() {
         ample_budget(),
     );
 
-    let mut h = spawn(BrainstemConfig {
+    let h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -227,7 +228,13 @@ async fn sc1_backoff_is_exponential() {
     ]);
     let (cog_tx, mut cog_rx) = mpsc::unbounded_channel::<RunEvent>();
     // Zero jitter so the delays are exactly base * mult^n.
-    let mut mind = ModelMind::new(Box::new(provider), ample_budget(), cog_tx).with_jitter_seed(0);
+    let mut mind = ModelMind::new(
+        Box::new(provider),
+        ample_budget(),
+        cog_tx,
+        Duration::from_secs(30),
+    )
+    .with_jitter_seed(0);
 
     let decide =
         tokio::spawn(async move { mind.decide(Perception::NewTask { goal: "g".into() }).await });
@@ -274,7 +281,7 @@ async fn sc1_decode_error_is_transient_blind_reissue() {
         ],
         ample_budget(),
     );
-    let mut h = spawn(BrainstemConfig {
+    let h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -316,7 +323,7 @@ async fn sc2_service_fatal_401_terminates_fatal() {
         })],
         ample_budget(),
     );
-    let mut h = spawn(BrainstemConfig {
+    let h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -325,13 +332,14 @@ async fn sc2_service_fatal_401_terminates_fatal() {
     let (t, _reply) = task("auth fails");
     h.inbox.send(t).await.unwrap();
 
-    let term = h.join.await.unwrap();
     assert!(
         matches!(term, Termination::Fatal(_)),
         "401 must be service-fatal"
     );
 
     let events = h.drain_events();
+
+    let term = h.join.await.unwrap();
     assert!(
         !events
             .iter()
@@ -341,7 +349,7 @@ async fn sc2_service_fatal_401_terminates_fatal() {
     assert!(events.iter().any(|e| matches!(
         e,
         RunEvent::Terminated {
-            termination: Termination::Fatal(_)
+            reason: Termination::Fatal(_)
         }
     )));
 }
@@ -362,7 +370,7 @@ async fn sc3_task_fatal_400_fails_task_service_continues() {
         ],
         ample_budget(),
     );
-    let mut h = spawn(BrainstemConfig {
+    let h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -388,8 +396,8 @@ async fn sc3_step_liveness_trip_is_task_fatal() {
     // FakeMind always asks to call the calculator -> never finishes -> trips
     // max_steps. The trip must be a task-fatal NoProgress, not service-fatal.
     let loops = vec![act_tool("c", "calculator", json!({"expression": "1+1"})); 10];
-    let mut h = spawn(BrainstemConfig {
-        mind: Box::new(FakeMind::new(loops)),
+    let h = spawn(BrainstemConfig {
+        mind: Box::new(FakeMind::with_script_only(loops)),
         registry: registry(),
         max_steps: 3,
     });
@@ -439,7 +447,7 @@ async fn sc4_two_malformed_recovered_third_is_task_fatal() {
         ],
         ample_budget(),
     );
-    let mut h = spawn(BrainstemConfig {
+    let h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -485,7 +493,7 @@ async fn sc5_token_exhaustion_throttles_then_resumes_after_reset() {
     // the same window. The second decide finds the window exhausted -> Throttle;
     // after the window resets the resume succeeds with `used` zeroed.
     let window = Duration::from_secs(60);
-    let budget = Budget {
+    let budget = RenewableBudget {
         period: Period::Every(window),
         max_tokens: 10,
     };
@@ -499,7 +507,7 @@ async fn sc5_token_exhaustion_throttles_then_resumes_after_reset() {
         ],
         budget,
     );
-    let mut h = spawn(BrainstemConfig {
+    let h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -544,8 +552,10 @@ async fn sc6_cancel_mid_sleep_wins_over_timer() {
     // Throttle for a long window, then cancel BEFORE advancing the clock past the
     // wake instant, so the cancel branch deterministically beats the timer.
     let reset_at = Instant::now() + Duration::from_secs(3600);
-    let mut h = spawn(BrainstemConfig {
-        mind: Box::new(FakeMind::new(vec![Decision::Throttle(reset_at)])),
+    let h = spawn(BrainstemConfig {
+        mind: Box::new(FakeMind::with_script_only(vec![Decision::Throttle(
+            reset_at,
+        )])),
         registry: registry(),
         max_steps: 8,
     });
@@ -567,7 +577,7 @@ async fn sc6_cancel_mid_sleep_wins_over_timer() {
 async fn sc12_cancel_mid_decide_terminates_cancelled() {
     // FakeMind::pending() yields a decide future that never resolves; cancelling
     // while parked on it must terminate Cancelled (goal 11/12).
-    let mut h = spawn(BrainstemConfig {
+    let h = spawn(BrainstemConfig {
         mind: Box::new(FakeMind::pending()),
         registry: registry(),
         max_steps: 8,
@@ -591,8 +601,11 @@ async fn sc12_cancel_mid_decide_terminates_cancelled() {
 
 #[tokio::test(start_paused = true)]
 async fn sc7_two_tasks_in_sequence_each_emits_outcome() {
-    let mut h = spawn(BrainstemConfig {
-        mind: Box::new(FakeMind::new(vec![done("first"), done("second")])),
+    let h = spawn(BrainstemConfig {
+        mind: Box::new(FakeMind::with_script_only(vec![
+            done("first"),
+            done("second"),
+        ])),
         registry: registry(),
         max_steps: 8,
     });
@@ -625,7 +638,7 @@ async fn sc7_two_tasks_in_sequence_each_emits_outcome() {
 #[tokio::test(start_paused = true)]
 async fn sc8_inbox_closed_terminates_stopped() {
     let h = spawn(BrainstemConfig {
-        mind: Box::new(FakeMind::new(vec![])),
+        mind: Box::new(FakeMind::with_script_only(vec![])),
         registry: registry(),
         max_steps: 8,
     });
@@ -648,8 +661,8 @@ async fn sc8_inbox_closed_terminates_stopped() {
 
 #[tokio::test(start_paused = true)]
 async fn sc9_status_while_working_reports_lifecycle_and_steps() {
-    let mut h = spawn(BrainstemConfig {
-        mind: Box::new(FakeMind::new(vec![
+    let h = spawn(BrainstemConfig {
+        mind: Box::new(FakeMind::with_script_only(vec![
             act_tool("c", "calculator", json!({"expression": "2+2"})),
             done("answered"),
         ])),
@@ -680,8 +693,10 @@ async fn sc9_status_during_throttle_reports_throttling() {
     // with the reset instant (goal 11/12). The only test that catches a
     // throttle-sleep select! omitting the status arm.
     let reset_at = Instant::now() + Duration::from_secs(3600);
-    let mut h = spawn(BrainstemConfig {
-        mind: Box::new(FakeMind::new(vec![Decision::Throttle(reset_at)])),
+    let h = spawn(BrainstemConfig {
+        mind: Box::new(FakeMind::with_script_only(vec![Decision::Throttle(
+            reset_at,
+        )])),
         registry: registry(),
         max_steps: 8,
     });
@@ -706,8 +721,8 @@ async fn sc9_status_during_throttle_reports_throttling() {
 
 #[tokio::test(start_paused = true)]
 async fn sc10_unknown_tool_is_recoverable_observation() {
-    let mut h = spawn(BrainstemConfig {
-        mind: Box::new(FakeMind::new(vec![
+    let h = spawn(BrainstemConfig {
+        mind: Box::new(FakeMind::with_script_only(vec![
             act_tool("c", "frobnicate", json!({})),
             done("continued after unknown tool"),
         ])),
@@ -723,7 +738,7 @@ async fn sc10_unknown_tool_is_recoverable_observation() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            RunEvent::Recovered {
+            RunEvent::RecoverableObservation {
                 error: RecoverableError::UnknownTool(_)
             }
         )),
@@ -742,8 +757,8 @@ async fn sc10_unknown_tool_is_recoverable_observation() {
 async fn sc11_event_set_is_emitted_on_its_paths() {
     // A single episode that exercises: task-received, command, command-result,
     // recovered (unknown tool), task-completed, and a terminal event.
-    let mut h = spawn(BrainstemConfig {
-        mind: Box::new(FakeMind::new(vec![
+    let h = spawn(BrainstemConfig {
+        mind: Box::new(FakeMind::with_script_only(vec![
             act_tool("c1", "calculator", json!({"expression": "1+1"})),
             act_tool("c2", "frobnicate", json!({})),
             done("all paths"),
@@ -755,10 +770,10 @@ async fn sc11_event_set_is_emitted_on_its_paths() {
     let (t, reply) = task("event coverage");
     h.inbox.send(t).await.unwrap();
     let _ = reply.await.unwrap();
-    h.cancel.cancel();
     let term = h.join.await.unwrap();
     assert!(matches!(term, Termination::Cancelled));
 
+    h.cancel.cancel();
     let events = h.drain_events();
     let has = |pred: fn(&RunEvent) -> bool| events.iter().any(pred);
 
@@ -802,11 +817,12 @@ async fn sc13_zero_quota_mind_throttles_then_budget_too_small() {
     let (cog_tx, _cog_rx) = mpsc::unbounded_channel::<RunEvent>();
     let mut mind = ModelMind::new(
         Box::new(provider),
-        Budget {
+        RenewableBudget {
             period: Period::Every(window),
             max_tokens: 0,
         },
         cog_tx,
+        Duration::from_secs(30),
     );
 
     let first = mind
@@ -838,12 +854,12 @@ async fn sc13_zero_quota_through_brainstem_throttles_then_fails_and_continues() 
     // advance past reset -> TaskFailed(BudgetTooSmall); service continues.
     let (mind, _cog_rx) = model_mind(
         vec![Ok(ModelResponse::text("never reached"))],
-        Budget {
+        RenewableBudget {
             period: Period::Every(Duration::from_secs(60)),
             max_tokens: 0,
         },
     );
-    let mut h = spawn(BrainstemConfig {
+    let h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
