@@ -178,7 +178,7 @@ async fn sc1_transient_503_retries_with_backoff_then_proceeds() {
         ample_budget(),
     );
 
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -281,7 +281,7 @@ async fn sc1_decode_error_is_transient_blind_reissue() {
         ],
         ample_budget(),
     );
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -323,7 +323,7 @@ async fn sc2_service_fatal_401_terminates_fatal() {
         })],
         ample_budget(),
     );
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -332,14 +332,13 @@ async fn sc2_service_fatal_401_terminates_fatal() {
     let (t, _reply) = task("auth fails");
     h.inbox.send(t).await.unwrap();
 
+    let term = (&mut h.join).await.unwrap();
     assert!(
         matches!(term, Termination::Fatal(_)),
         "401 must be service-fatal"
     );
 
     let events = h.drain_events();
-
-    let term = h.join.await.unwrap();
     assert!(
         !events
             .iter()
@@ -396,7 +395,7 @@ async fn sc3_step_liveness_trip_is_task_fatal() {
     // FakeMind always asks to call the calculator -> never finishes -> trips
     // max_steps. The trip must be a task-fatal NoProgress, not service-fatal.
     let loops = vec![act_tool("c", "calculator", json!({"expression": "1+1"})); 10];
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind: Box::new(FakeMind::with_script_only(loops)),
         registry: registry(),
         max_steps: 3,
@@ -507,7 +506,7 @@ async fn sc5_token_exhaustion_throttles_then_resumes_after_reset() {
         ],
         budget,
     );
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
@@ -552,7 +551,7 @@ async fn sc6_cancel_mid_sleep_wins_over_timer() {
     // Throttle for a long window, then cancel BEFORE advancing the clock past the
     // wake instant, so the cancel branch deterministically beats the timer.
     let reset_at = Instant::now() + Duration::from_secs(3600);
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind: Box::new(FakeMind::with_script_only(vec![Decision::Throttle(
             reset_at,
         )])),
@@ -601,7 +600,7 @@ async fn sc12_cancel_mid_decide_terminates_cancelled() {
 
 #[tokio::test(start_paused = true)]
 async fn sc7_two_tasks_in_sequence_each_emits_outcome() {
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind: Box::new(FakeMind::with_script_only(vec![
             done("first"),
             done("second"),
@@ -721,7 +720,7 @@ async fn sc9_status_during_throttle_reports_throttling() {
 
 #[tokio::test(start_paused = true)]
 async fn sc10_unknown_tool_is_recoverable_observation() {
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind: Box::new(FakeMind::with_script_only(vec![
             act_tool("c", "frobnicate", json!({})),
             done("continued after unknown tool"),
@@ -757,7 +756,7 @@ async fn sc10_unknown_tool_is_recoverable_observation() {
 async fn sc11_event_set_is_emitted_on_its_paths() {
     // A single episode that exercises: task-received, command, command-result,
     // recovered (unknown tool), task-completed, and a terminal event.
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind: Box::new(FakeMind::with_script_only(vec![
             act_tool("c1", "calculator", json!({"expression": "1+1"})),
             act_tool("c2", "frobnicate", json!({})),
@@ -770,10 +769,11 @@ async fn sc11_event_set_is_emitted_on_its_paths() {
     let (t, reply) = task("event coverage");
     h.inbox.send(t).await.unwrap();
     let _ = reply.await.unwrap();
-    let term = h.join.await.unwrap();
-    assert!(matches!(term, Termination::Cancelled));
 
     h.cancel.cancel();
+    let term = (&mut h.join).await.unwrap();
+    assert!(matches!(term, Termination::Cancelled));
+
     let events = h.drain_events();
     let has = |pred: fn(&RunEvent) -> bool| events.iter().any(pred);
 
@@ -859,7 +859,7 @@ async fn sc13_zero_quota_through_brainstem_throttles_then_fails_and_continues() 
             max_tokens: 0,
         },
     );
-    let h = spawn(BrainstemConfig {
+    let mut h = spawn(BrainstemConfig {
         mind,
         registry: registry(),
         max_steps: 8,
