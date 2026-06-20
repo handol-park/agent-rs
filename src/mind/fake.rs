@@ -27,7 +27,7 @@ impl FakeMind {
     }
 
     /// Create a FakeMind with default budget summary (for simple tests).
-    pub fn with_script(script: Vec<Decision>) -> Self {
+    pub fn with_script_only(script: Vec<Decision>) -> Self {
         let now = Instant::now();
         Self::new(
             script,
@@ -38,15 +38,10 @@ impl FakeMind {
         )
     }
 
-    /// Create a FakeMind with default budget summary (for simple tests).
-    pub fn with_script_only(script: Vec<Decision>) -> Self {
-        Self::with_script(script)
-    }
-
     /// Create a FakeMind whose `decide` never resolves (for the mid-decide
     /// cancellation test, SC 12).
     pub fn pending() -> Self {
-        let mut mind = Self::with_script(Vec::new());
+        let mut mind = Self::with_script_only(Vec::new());
         mind.never_resolves = true;
         mind
     }

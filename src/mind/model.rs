@@ -191,14 +191,10 @@ impl Mind for ModelMind {
             self.budget_state
                 .charge(now, &self.budget, response.usage.total());
 
-            // Map response to decision
-            if let Some(text) = response.text {
-                if !text.trim().is_empty() {
-                    self.resuming = false;
-                    return Decision::Done(Outcome { message: text });
-                }
-            }
-
+            // Map response to decision. Tool calls take priority over text: a model
+            // that wants to act often emits explanatory text alongside the tool call,
+            // and dropping the call (returning Done on the text) would strand the
+            // intended action. So check tool_calls first, then a final text answer.
             if !response.tool_calls.is_empty() {
                 self.malformed_count = 0;
                 self.resuming = false;
@@ -209,6 +205,13 @@ impl Mind for ModelMind {
                     name: tc.name.clone(),
                     input: tc.arguments.clone(),
                 });
+            }
+
+            if let Some(text) = response.text {
+                if !text.trim().is_empty() {
+                    self.resuming = false;
+                    return Decision::Done(Outcome { message: text });
+                }
             }
 
             // No usable command: malformed output
@@ -442,6 +445,42 @@ mod tests {
             }
         }
         assert!(retries >= 1, "the timed-out call must schedule a retry");
+    }
+
+    /// Spec goal 2: a response carrying BOTH text and a tool call must `Act` on the
+    /// tool, not return `Done` on the text (which would strand the action).
+    #[tokio::test]
+    async fn tool_call_takes_priority_over_text() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let response = ModelResponse {
+            text: Some("Let me calculate that.".to_string()),
+            tool_calls: vec![crate::provider::ToolCall {
+                id: "c1".to_string(),
+                name: "calculator".to_string(),
+                arguments: serde_json::json!({"expression": "1+1"}),
+            }],
+            usage: crate::provider::Usage::default(),
+        };
+
+        let provider = FakeProvider::new(vec![Ok(response)]);
+        let mut mind = ModelMind::new(
+            Box::new(provider),
+            RenewableBudget::default(),
+            tx,
+            Duration::from_secs(10),
+        );
+
+        let decision = mind
+            .decide(Perception::NewTask {
+                goal: "compute".into(),
+            })
+            .await;
+
+        match decision {
+            Decision::Act(Command::CallTool { name, .. }) => assert_eq!(name, "calculator"),
+            _ => panic!("a response with text and a tool call must return Act(CallTool)"),
+        }
     }
 }
 

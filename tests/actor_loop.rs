@@ -787,8 +787,8 @@ async fn sc11_event_set_is_emitted_on_its_paths() {
         "CommandResult"
     );
     assert!(
-        has(|e| matches!(e, RunEvent::Recovered { .. })),
-        "Recovered (unknown tool)"
+        has(|e| matches!(e, RunEvent::RecoverableObservation { .. })),
+        "RecoverableObservation (unknown tool)"
     );
     assert!(
         has(|e| matches!(e, RunEvent::TaskCompleted { .. })),
@@ -798,6 +798,11 @@ async fn sc11_event_set_is_emitted_on_its_paths() {
         has(|e| matches!(e, RunEvent::Terminated { .. })),
         "Terminated"
     );
+
+    // The remaining goal-17 events do not arise in this happy-path + unknown-tool
+    // scenario; they are asserted on their own paths elsewhere: RetryScheduled in
+    // SC 1, WindowReset/ThrottleSleep in SC 5, cancel Terminated in SC 6, and
+    // TaskFailed in SC 3. This test covers the per-step event set, not all of goal 17.
 }
 
 // ---------------------------------------------------------------------------

@@ -64,7 +64,7 @@ struct BrainstemState {
 }
 
 impl BrainstemState {
-    fn build_snapshot(&self) -> Snapshot {
+    fn build_snapshot(&self, queue_depth: usize) -> Snapshot {
         // While throttling, the reset the agent is waiting on is the throttle
         // wake instant, not the (stale) summary captured before the decide.
         let next_reset = match (self.lifecycle, self.throttle_wake) {
@@ -76,7 +76,7 @@ impl BrainstemState {
             current_task: self.current_task.clone(),
             tokens_remaining: self.budget_summary.tokens_remaining,
             next_reset,
-            queue_depth: 0,
+            queue_depth,
             steps_used: self.steps_used,
         }
     }
@@ -130,7 +130,7 @@ impl Brainstem {
                     return Termination::Cancelled;
                 }
                 Some(reply_tx) = self.status_rx.recv() => {
-                    let snapshot = state.build_snapshot();
+                    let snapshot = state.build_snapshot(self.inbox.len());
                     let _ = reply_tx.send(snapshot);
                 }
                 task = self.inbox.recv() => {
@@ -220,7 +220,7 @@ impl Brainstem {
                             return Err(EpisodeFailure::Cancelled);
                         }
                         Some(reply_tx) = self.status_rx.recv() => {
-                            let snapshot = state.build_snapshot();
+                            let snapshot = state.build_snapshot(self.inbox.len());
                             let _ = reply_tx.send(snapshot);
                             // Continue waiting for decide
                         }
@@ -261,14 +261,11 @@ impl Brainstem {
                     let _ = self.event_tx.send(RunEvent::CommandResult { call_id, ok });
 
                     if let Observation::Recoverable { error, .. } = &obs {
-                        // Emit both the 002 actor-agent variant (no step) and the
-                        // canonical `Recovered` event named in goal 17 / plan 002,
-                        // so consumers keying on either name observe this path.
+                        // `RecoverableObservation` is the v0.2 canonical recoverable
+                        // event (no `step` — the perpetual loop has no 001 step model).
+                        // The 001 `Recovered` variant is left to the 001 loop; emit one
+                        // event per recoverable observation, not two.
                         let _ = self.event_tx.send(RunEvent::RecoverableObservation {
-                            error: error.clone(),
-                        });
-                        let _ = self.event_tx.send(RunEvent::Recovered {
-                            step: state.steps_used,
                             error: error.clone(),
                         });
                     }
@@ -300,7 +297,7 @@ impl Brainstem {
                                 return Err(EpisodeFailure::Cancelled);
                             }
                             Some(reply_tx) = self.status_rx.recv() => {
-                                let snapshot = state.build_snapshot();
+                                let snapshot = state.build_snapshot(self.inbox.len());
                                 let _ = reply_tx.send(snapshot);
                             }
                             _ = &mut sleep_fut => {
@@ -365,7 +362,7 @@ impl Brainstem {
                     return Err(EpisodeFailure::Cancelled);
                 }
                 Some(reply_tx) = self.status_rx.recv() => {
-                    let _ = reply_tx.send(state.build_snapshot());
+                    let _ = reply_tx.send(state.build_snapshot(self.inbox.len()));
                 }
                 result = &mut handle => {
                     return match result {
