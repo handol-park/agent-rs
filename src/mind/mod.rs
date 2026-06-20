@@ -12,6 +12,7 @@ use crate::budget::BudgetSummary;
 use crate::error::AgentError;
 use crate::event::RunEvent;
 use crate::observation::{Observation, Outcome};
+use crate::tool::ToolSchema;
 
 /// A perception passed to the mind: either a new task, an observation from the
 /// previous command, or a resume signal after throttling.
@@ -85,4 +86,9 @@ pub trait Mind: Send + Sync {
     /// single event stream (plan 002: both ends are producers on one channel).
     /// The default is a no-op for minds (e.g. `FakeMind`) that emit nothing.
     fn set_event_sink(&mut self, _events: UnboundedSender<RunEvent>) {}
+
+    /// Inject the tool schemas the brainstem's registry advertises, so a
+    /// model-backed mind can tell the provider which tools exist. Default is a
+    /// no-op for minds that don't talk to a provider (e.g. `FakeMind`).
+    fn set_tools(&mut self, _tools: Vec<ToolSchema>) {}
 }

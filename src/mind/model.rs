@@ -11,6 +11,7 @@ use crate::event::RunEvent;
 use crate::mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
 use crate::observation::{Observation, Outcome};
 use crate::provider::{Message, ModelRequest, Provider};
+use crate::tool::ToolSchema;
 
 /// A model-backed Mind that owns the provider, budget, working memory, and retry logic.
 pub struct ModelMind {
@@ -23,6 +24,7 @@ pub struct ModelMind {
     resuming: bool,
     malformed_count: usize,
     backoff_seed: u64,
+    tools: Vec<ToolSchema>,
 }
 
 impl ModelMind {
@@ -42,6 +44,7 @@ impl ModelMind {
             resuming: false,
             malformed_count: 0,
             backoff_seed: 12345, // Fixed seed for deterministic tests
+            tools: Vec::new(),
         }
     }
 
@@ -95,13 +98,17 @@ impl ModelMind {
         let base_delay = Duration::from_secs(1);
         let max_delay = Duration::from_secs(60);
 
-        loop {
-            let request = ModelRequest {
-                system: "You are a helpful assistant.".to_string(),
-                messages: self.working_memory.clone(),
-                tools: Vec::new(), // TODO: pass tool schemas
-            };
+        // The request is invariant across retries — `working_memory` and `tools`
+        // are not mutated inside this loop (the malformed re-prompt path lives in
+        // `decide`, not here). Build it once so a long conversation history and the
+        // tool schemas aren't re-cloned on every transient retry.
+        let request = ModelRequest {
+            system: "You are a helpful assistant.".to_string(),
+            messages: self.working_memory.clone(),
+            tools: self.tools.clone(),
+        };
 
+        loop {
             // A timed-out call is itself a transient error (spec goal 3): flatten the
             // `Result<Result<_, _>, Elapsed>` into the provider-error channel so the
             // timeout falls into the `Err(e)` arm below and is retried — never
@@ -205,7 +212,10 @@ impl Mind for ModelMind {
             if !response.tool_calls.is_empty() {
                 self.malformed_count = 0;
                 self.resuming = false;
-                // Return the first tool call as a command
+                // LIMITATION: only the first tool call is actuated. Providers can
+                // emit several tool calls in one turn, but `Decision::Act` carries a
+                // single `Command`, so the rest are dropped. Parallel/multiple tool
+                // calls per turn are explicitly out of scope for spec-002/003.
                 let tc = &response.tool_calls[0];
                 return Decision::Act(Command::CallTool {
                     call_id: tc.id.clone(),
@@ -248,6 +258,10 @@ impl Mind for ModelMind {
 
     fn set_event_sink(&mut self, events: UnboundedSender<RunEvent>) {
         self.event_tx = events;
+    }
+
+    fn set_tools(&mut self, tools: Vec<ToolSchema>) {
+        self.tools = tools;
     }
 }
 
@@ -522,6 +536,76 @@ mod tests {
         assert_eq!(
             reqs[0], reqs[1],
             "Decode retry must be a blind re-issue of the identical request"
+        );
+    }
+
+    /// Spec 003 / SC 2 positive: `set_tools` schemas reach the provider request.
+    #[tokio::test]
+    async fn set_tools_schemas_reach_the_provider_request() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let provider = FakeProvider::new(vec![Ok(ModelResponse::text("computed"))]);
+        let seen = provider.requests_handle();
+
+        let mut mind = ModelMind::new(
+            Box::new(provider),
+            RenewableBudget::default(),
+            tx,
+            Duration::from_secs(10),
+        );
+
+        // Set tools from the default registry
+        let registry = crate::tool::default_registry();
+        mind.set_tools(registry.schemas());
+
+        let decision = mind
+            .decide(Perception::NewTask {
+                goal: "test".into(),
+            })
+            .await;
+        assert!(matches!(decision, Decision::Done(_)));
+
+        let reqs = seen.lock().expect("not poisoned").clone();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            !reqs[0].tools.is_empty(),
+            "request.tools must be non-empty after set_tools"
+        );
+        assert!(
+            reqs[0].tools.iter().any(|s| s.name == "calculator"),
+            "request.tools must contain the calculator schema"
+        );
+    }
+
+    /// Spec 003 / SC 2 negative: without `set_tools`, request advertises no tools.
+    #[tokio::test]
+    async fn without_set_tools_request_advertises_no_tools() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let provider = FakeProvider::new(vec![Ok(ModelResponse::text("done"))]);
+        let seen = provider.requests_handle();
+
+        let mut mind = ModelMind::new(
+            Box::new(provider),
+            RenewableBudget::default(),
+            tx,
+            Duration::from_secs(10),
+        );
+
+        // Do NOT call set_tools
+
+        let decision = mind
+            .decide(Perception::NewTask {
+                goal: "test".into(),
+            })
+            .await;
+        assert!(matches!(decision, Decision::Done(_)));
+
+        let reqs = seen.lock().expect("not poisoned").clone();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            reqs[0].tools.is_empty(),
+            "request.tools must be empty when set_tools was never called"
         );
     }
 }
