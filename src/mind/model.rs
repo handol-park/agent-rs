@@ -98,13 +98,17 @@ impl ModelMind {
         let base_delay = Duration::from_secs(1);
         let max_delay = Duration::from_secs(60);
 
-        loop {
-            let request = ModelRequest {
-                system: "You are a helpful assistant.".to_string(),
-                messages: self.working_memory.clone(),
-                tools: self.tools.clone(),
-            };
+        // The request is invariant across retries — `working_memory` and `tools`
+        // are not mutated inside this loop (the malformed re-prompt path lives in
+        // `decide`, not here). Build it once so a long conversation history and the
+        // tool schemas aren't re-cloned on every transient retry.
+        let request = ModelRequest {
+            system: "You are a helpful assistant.".to_string(),
+            messages: self.working_memory.clone(),
+            tools: self.tools.clone(),
+        };
 
+        loop {
             // A timed-out call is itself a transient error (spec goal 3): flatten the
             // `Result<Result<_, _>, Elapsed>` into the provider-error channel so the
             // timeout falls into the `Err(e)` arm below and is retried — never
