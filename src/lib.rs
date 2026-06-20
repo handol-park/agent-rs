@@ -7,8 +7,8 @@
 //! planner land in subsequent phases.
 
 pub mod action;
-pub mod budget;
 pub mod brainstem;
+pub mod budget;
 pub mod error;
 pub mod event;
 pub mod memory;

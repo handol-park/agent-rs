@@ -132,7 +132,7 @@ impl Brainstem {
                             let _ = self.event_tx.send(RunEvent::TaskReceived {
                                 goal: task.goal.clone(),
                             });
-                            
+
                             match self.run_episode(task.goal.clone(), &mut state).await {
                                 Ok(outcome) => {
                                     let _ = self.event_tx.send(RunEvent::TaskCompleted {
@@ -165,7 +165,7 @@ impl Brainstem {
                                     return Termination::Cancelled;
                                 }
                             }
-                            
+
                             // Reset for next task
                             state.current_task = None;
                             state.steps_used = 0;
@@ -234,7 +234,7 @@ impl Brainstem {
 
                     // Actuate command off-loop with spawn_blocking
                     let obs = self.actuate_command(cmd).await?;
-                    
+
                     let ok = matches!(obs, Observation::ToolResult { .. });
                     let call_id = match &obs {
                         Observation::ToolResult { call_id, .. } => call_id.clone(),
@@ -242,7 +242,7 @@ impl Brainstem {
                             call_id.clone().unwrap_or_default()
                         }
                     };
-                    
+
                     let _ = self.event_tx.send(RunEvent::CommandResult { call_id, ok });
 
                     if let Observation::Recoverable { error, .. } = &obs {
@@ -295,33 +295,35 @@ impl Brainstem {
 
     /// Actuate a command via spawn_blocking (tools are sync).
     async fn actuate_command(&self, cmd: Command) -> Result<Observation, EpisodeFailure> {
-        let Command::CallTool { call_id, name, input } = cmd;
+        let Command::CallTool {
+            call_id,
+            name,
+            input,
+        } = cmd;
 
         let registry = Arc::clone(&self.registry);
         let name_clone = name.clone();
         let call_id_clone = call_id.clone();
 
         // spawn_blocking for sync tool execution
-        let handle = spawn_blocking(move || {
-            match registry.get(&name_clone) {
-                None => Observation::Recoverable {
+        let handle = spawn_blocking(move || match registry.get(&name_clone) {
+            None => Observation::Recoverable {
+                call_id: Some(call_id_clone),
+                error: RecoverableError::UnknownTool(name_clone),
+            },
+            Some(tool) => match tool.execute(&input) {
+                Ok(output) => Observation::ToolResult {
+                    call_id: call_id_clone,
+                    output,
+                },
+                Err(e) => Observation::Recoverable {
                     call_id: Some(call_id_clone),
-                    error: RecoverableError::UnknownTool(name_clone),
-                },
-                Some(tool) => match tool.execute(&input) {
-                    Ok(output) => Observation::ToolResult {
-                        call_id: call_id_clone,
-                        output,
-                    },
-                    Err(e) => Observation::Recoverable {
-                        call_id: Some(call_id_clone),
-                        error: RecoverableError::ToolFailed {
-                            name: name_clone,
-                            error: e.to_string(),
-                        },
+                    error: RecoverableError::ToolFailed {
+                        name: name_clone,
+                        error: e.to_string(),
                     },
                 },
-            }
+            },
         });
 
         // Wait for join with cancel select
@@ -353,4 +355,21 @@ enum EpisodeFailure {
     TaskFatal(TaskFault),
     ServiceFatal(String),
     Cancelled,
+}
+
+impl Brainstem {
+    /// Spawn the brainstem on a background task and return its JoinHandle.
+    /// Helper for tests and examples.
+    pub fn spawn(
+        mind: Box<dyn Mind>,
+        registry: Arc<ToolRegistry>,
+        max_steps: usize,
+        inbox: mpsc::Receiver<Task>,
+        status_rx: mpsc::Receiver<oneshot::Sender<Snapshot>>,
+        cancel: CancellationToken,
+        event_tx: mpsc::UnboundedSender<RunEvent>,
+    ) -> tokio::task::JoinHandle<Termination> {
+        let brainstem = Brainstem::new(mind, registry, max_steps, inbox, status_rx, cancel, event_tx);
+        tokio::spawn(async move { brainstem.run().await })
+    }
 }

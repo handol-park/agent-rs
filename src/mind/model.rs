@@ -1,7 +1,6 @@
 //! ModelMind: a model-backed Mind implementation (spec 002 goals 2-5).
 
 use async_trait::async_trait;
-use serde_json::json;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::{sleep_until, Instant};
@@ -12,7 +11,6 @@ use crate::event::RunEvent;
 use crate::mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
 use crate::observation::{Observation, Outcome};
 use crate::provider::{Message, ModelRequest, Provider};
-use crate::tool::ToolSchema;
 
 /// A model-backed Mind that owns the provider, budget, working memory, and retry logic.
 pub struct ModelMind {
@@ -71,9 +69,7 @@ impl ModelMind {
                                 call_id: id.clone(),
                                 content: error_msg,
                             },
-                            None => Message::User {
-                                content: error_msg,
-                            },
+                            None => Message::User { content: error_msg },
                         }
                     }
                 };
@@ -99,9 +95,10 @@ impl ModelMind {
                 tools: Vec::new(), // TODO: pass tool schemas
             };
 
-            let result = tokio::time::timeout(self.per_call_timeout, self.provider.complete(&request))
-                .await
-                .map_err(|_| ProviderError::Transport("call timeout".into()))?;
+            let result =
+                tokio::time::timeout(self.per_call_timeout, self.provider.complete(&request))
+                    .await
+                    .map_err(|_| ProviderError::Transport("call timeout".into()))?;
 
             match result {
                 Ok(response) => return Ok(response),
@@ -109,7 +106,12 @@ impl ModelMind {
                     match e.class() {
                         ErrorClass::Transient => {
                             attempt += 1;
-                            let delay = exponential_backoff(attempt, base_delay, max_delay, self.backoff_seed);
+                            let delay = exponential_backoff(
+                                attempt,
+                                base_delay,
+                                max_delay,
+                                self.backoff_seed,
+                            );
                             let _ = self.event_tx.send(RunEvent::RetryScheduled {
                                 attempt,
                                 delay,
@@ -171,13 +173,14 @@ impl Mind for ModelMind {
                             // Should never reach here (call_with_retry loops on transient)
                             unreachable!("call_with_retry should loop on transient errors")
                         }
-                    }
+                    };
                 }
             };
 
             // Charge tokens
             let now = Instant::now();
-            self.budget_state.charge(now, &self.budget, response.usage.total());
+            self.budget_state
+                .charge(now, &self.budget, response.usage.total());
 
             // Map response to decision
             if let Some(text) = response.text {
@@ -213,9 +216,8 @@ impl Mind for ModelMind {
                 "Your response contained no text and no tool calls. Please provide either a final answer or call a tool. (Attempt {}/2)",
                 self.malformed_count
             );
-            self.working_memory.push(Message::User {
-                content: error_msg,
-            });
+            self.working_memory
+                .push(Message::User { content: error_msg });
             // Loop to try again
         }
     }
@@ -231,7 +233,7 @@ fn exponential_backoff(attempt: usize, base: Duration, cap: Duration, seed: u64)
     let multiplier = 2u64.saturating_pow(attempt as u32);
     let delay_secs = base.as_secs().saturating_mul(multiplier);
     let capped = delay_secs.min(cap.as_secs());
-    
+
     // Full jitter: random in [0, capped]
     let jittered = xorshift_range(seed.wrapping_add(attempt as u64), capped);
     Duration::from_secs(jittered)
@@ -258,10 +260,16 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn transient_error_retries_with_backoff() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        
+
         let provider = FakeProvider::new(vec![
-            Err(ProviderError::Api { status: 503, body: "down".into() }),
-            Err(ProviderError::Api { status: 503, body: "down".into() }),
+            Err(ProviderError::Api {
+                status: 503,
+                body: "down".into(),
+            }),
+            Err(ProviderError::Api {
+                status: 503,
+                body: "down".into(),
+            }),
             Ok(ModelResponse::text("ok")),
         ]);
 
@@ -279,9 +287,7 @@ mod tests {
         let perception = Perception::NewTask { goal };
 
         // Spawn the decide future
-        let decide_handle = tokio::spawn(async move {
-            mind.decide(perception).await
-        });
+        let decide_handle = tokio::spawn(async move { mind.decide(perception).await });
 
         // Advance time to let retries happen
         tokio::time::advance(Duration::from_secs(120)).await;
@@ -302,10 +308,11 @@ mod tests {
     #[tokio::test]
     async fn service_fatal_error_returns_failed() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        
-        let provider = FakeProvider::new(vec![
-            Err(ProviderError::Api { status: 401, body: "unauthorized".into() }),
-        ]);
+
+        let provider = FakeProvider::new(vec![Err(ProviderError::Api {
+            status: 401,
+            body: "unauthorized".into(),
+        })]);
 
         let mut mind = ModelMind::new(
             Box::new(provider),
@@ -314,17 +321,19 @@ mod tests {
             Duration::from_secs(10),
         );
 
-        let decision = mind.decide(Perception::NewTask { goal: "test".into() }).await;
+        let decision = mind
+            .decide(Perception::NewTask {
+                goal: "test".into(),
+            })
+            .await;
         assert!(matches!(decision, Decision::Failed(Reason::Service(_))));
     }
 
     #[tokio::test(start_paused = true)]
     async fn budget_exhaustion_throttles() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        
-        let provider = FakeProvider::new(vec![
-            Ok(ModelResponse::text("response")),
-        ]);
+
+        let provider = FakeProvider::new(vec![Ok(ModelResponse::text("response"))]);
 
         let mut mind = ModelMind::new(
             Box::new(provider),
@@ -337,9 +346,21 @@ mod tests {
         );
 
         // Exhaust budget
-        mind.budget_state.used = 10;
+        mind.budget_state.set_used_for_test(10);
 
-        let decision = mind.decide(Perception::NewTask { goal: "test".into() }).await;
+        let decision = mind
+            .decide(Perception::NewTask {
+                goal: "test".into(),
+            })
+            .await;
         assert!(matches!(decision, Decision::Throttle(_)));
+    }
+}
+
+impl ModelMind {
+    /// Set the backoff jitter seed for deterministic tests.
+    pub fn with_jitter_seed(mut self, seed: u64) -> Self {
+        self.backoff_seed = seed;
+        self
     }
 }

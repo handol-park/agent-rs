@@ -204,6 +204,14 @@ impl BudgetSummary {
 }
 
 #[cfg(test)]
+impl BudgetState {
+    /// Test helper: directly set the used token count.
+    pub fn set_used_for_test(&mut self, used: u64) {
+        self.used = used;
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
