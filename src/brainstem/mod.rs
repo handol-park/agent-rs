@@ -109,6 +109,7 @@ impl Brainstem {
         // events (RetryScheduled, WindowReset) interleave with brainstem events
         // (plan 002: both ends are producers on one channel).
         self.mind.set_event_sink(self.event_tx.clone());
+        self.mind.set_tools(self.registry.schemas());
 
         let mut state = BrainstemState {
             lifecycle: Lifecycle::Idle,
