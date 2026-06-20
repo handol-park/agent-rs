@@ -21,6 +21,28 @@ nix develop -c cargo check         # fast compile check
 nix develop -c cargo test <name>   # single test
 ```
 
+The default suite is fully offline — every test drives `FakeProvider` / `FakeMind`
+with scripted responses, so `make check` needs no network or API keys.
+
+### End-to-end tests against a real LLM (`tests/e2e_ollama.rs`)
+
+These exercise the live `OpenAiProvider` (request construction, tool-schema
+serialization, `tool_calls` parsing) against a real OpenAI-compatible backend.
+They are `#[ignore]`d so `make check` skips them, and they self-skip at runtime
+if `LLM_*` is unset — but they still compile under the gate, catching API drift.
+
+The agent loop requires native tool-calling, so the model must support it.
+Verified against a local Ollama serving `qwen3.5:4b-nvfp4`:
+
+```bash
+ollama serve &
+ollama pull qwen3.5:4b-nvfp4
+export LLM_BASE_URL=http://localhost:11434/v1   # the /v1 suffix is required
+export LLM_API_KEY=ollama                        # any non-empty string; Ollama ignores it
+export LLM_MODEL=qwen3.5:4b-nvfp4
+nix develop -c cargo test --test e2e_ollama -- --ignored --nocapture
+```
+
 ## Architecture
 
 The crate carries two generations. **v0.2 (the actor service, spec 002)
