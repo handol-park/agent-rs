@@ -22,7 +22,7 @@ determinism (goal 18). 001's `src/lib.rs` imports `use std::time::Instant`; that
 ```
 src/lib.rs              re-exports; Brainstem entry; Termination
 src/mind/mod.rs         Mind trait; Perception, Command, Decision, Outcome, Reason, TaskFault
-src/mind/model.rs       ModelMind: owns Box<dyn Provider> + working memory + Budget + mpsc::Sender<RunEvent>; classify/retry/backoff; malformed cap; throttle
+src/mind/model.rs       ModelMind: owns Box<dyn Provider> + working memory + Budget + mpsc::UnboundedSender<RunEvent>; classify/retry/backoff; malformed cap; throttle
 src/mind/fake.rs        FakeMind (scripted Decisions) for brainstem tests
 src/brainstem/mod.rs    Brainstem, run loop (select!/pin/spawn_blocking), Snapshot, Lifecycle, BrainstemState, Termination
 src/observation.rs      Observation, Outcome, TaskOutcome
@@ -72,8 +72,9 @@ pub enum Termination { Cancelled, Fatal(AgentError), Stopped }           // run-
 pub enum Period { Daily, Weekly, Every(Duration) }                       // Daily=24h, Weekly=7d
 pub struct Budget { pub period: Period, pub max_tokens: u64 }
 pub struct BudgetState { start: Instant, window: u64, used: u64 }
-//  window(now)=floor(now.saturating_duration_since(start)/period)  // saturating_duration_since, NOT
-//      `now - start` — direct Instant subtraction panics if now < start (possible under paused/mocked time);
+//  window(now)= now.saturating_duration_since(start).as_nanos() / period.as_nanos()  // INTEGER
+//      division (u128 nanos), not float — exact, idiomatic, auto-floors. saturating_duration_since,
+//      NOT `now - start` — direct Instant subtraction panics if now < start (possible under paused time);
 //  refresh(now) rolls window & zeroes `used` on crossing (goal 15);
 //  charge(now,t) = refresh then used = used.saturating_add(t)   // saturating — fixes the 001 overflow bug
 //  remaining(now), exhausted(now)= used >= max_tokens (a fresh window funds ≥1 call iff max_tokens>0),
@@ -101,16 +102,22 @@ throttle-resume can be distinguished from a fresh stimulus.
 
 **Event emission (goal 17).** Cognitive events that fire *inside* a `decide` —
 `RetryScheduled` (per transient retry) and `WindowReset` (per budget window
-crossing) — are sent through an `mpsc::Sender<RunEvent>` **injected at
+crossing) — are sent through an **`mpsc::UnboundedSender<RunEvent>`** **injected at
 construction**, not returned from `decide`. _(Chosen over accumulating a `Vec`
 drained by the brainstem after `decide`: the attempt loop can retry-sleep for a
 long time, and the whole point of `RetryScheduled` is to make a stuck provider
 observable **while** `decide` is still blocked. A drained-`Vec` design would hide
-those events until the call returns.)_ The brainstem emits every other `RunEvent`
-(task lifecycle, command/result, throttle-sleep, terminal); both ends are
-producers on the same channel (`mpsc` is multi-producer).
+those events until the call returns.)_ **It MUST be `UnboundedSender`, not the
+bounded `Sender`:** the brainstem is parked on the `decide` future inside the
+per-turn `select!` and cannot concurrently drain the `RunEvent` receiver, so a
+bounded channel that fills mid-retry would suspend `sender.send().await`, suspend
+`decide`, and **deadlock** (no `select!` arm drains `rx`). `send()` on an
+`UnboundedSender` is non-blocking; the production rate is bounded (≤ one event per
+per-call timeout + backoff), so unbounded growth is not a practical concern. The
+brainstem emits every other `RunEvent` (task lifecycle, command/result,
+throttle-sleep, terminal); both ends are producers on the same channel (multi-producer).
 
-1. **Fold the perception once.** `NewTask` resets working memory **and clears
+1. **Fold the perception once.** `NewTask` resets working memory **and sets
    `self.resuming = false`** (defensive: makes "no `NewTask` arrives while
    `resuming`" self-enforcing rather than relying on the drive loop never sending
    one — costs nothing, removes a latent bug class if the loop changes); folds the
@@ -141,15 +148,18 @@ producers on the same channel (`mpsc` is multi-producer).
      but smaller than a *typical* call's cost does **not** fail — it makes throttled
      progress (≤ one decide per window). SC 13 uses case (a), `max_tokens == 0`, as the
      simplest deterministic trigger.
-   - Call the provider inside `tokio::time::timeout(per_call)`. Classify
-     (`ProviderError::class`): Transient → `sleep(backoff)` (capped 60s, full
-     jitter), emit `RetryScheduled`, retry **unbounded** (goal 3); ServiceFatal →
-     `Failed(Reason::Service(_))`; TaskFatal → `Failed(Reason::Task(BadRequest))`.
+   - Call the provider inside `tokio::time::timeout(per_call)`. A timeout yields
+     `tokio::time::error::Elapsed` (**not** a `ProviderError`) — map it to a
+     transient `ProviderError` (e.g. `ProviderError::Transport`, or classify
+     `Elapsed` directly as `Transient`) so a timed-out call is retried (goal 3).
+     Then classify (`ProviderError::class`): Transient → `sleep(backoff)` (capped
+     60s, full jitter), emit `RetryScheduled`, retry **unbounded** (goal 3);
+     ServiceFatal → `Failed(Reason::Service(_))`; TaskFatal → `Failed(Reason::Task(BadRequest))`.
    - On success: `budget.charge(now, usage)` (saturating). Map response:
      tool-calls → `Act(CallTool)`; final text → `Done`; **no usable command** →
      re-prompt, capped at 2 consecutive, then `Failed(Reason::Task(Malformed))`
      (goal 5); otherwise loop for the next call.
-3. On returning any **terminal** decision (`Act`/`Done`/`Failed`) clear
+3. On returning any **terminal** decision (`Act`/`Done`/`Failed`) set
    `self.resuming = false`.
 
 ## The drive loop (`Brainstem::run` → `Termination`)
@@ -170,12 +180,16 @@ arm and the decide future borrow different fields. Then match the Decision:
   end episode (goal 8). Else actuate **off-loop**: clone the `Arc<ToolRegistry>` and
   do the lookup-and-run *inside* the closure (the `'static` bound on `spawn_blocking`
   forbids borrowing a `&dyn Tool` across it) —
-  `spawn_blocking(move || match registry.get(&cmd.name) { Some(t) => t.execute(&cmd.input), None => Err(UnknownTool) })`
-  (goal 7). _(001's `ToolRegistry` has `get`/`register`/`schemas` but no `execute`; either
-  add an `execute(&self, cmd)` helper that does this match, or inline it as above — do not
-  assume a pre-existing `registry.execute`.)_ Wrap the join in the same cancel/status
-  `select!`; result → `Observation`; `perception=Observation(obs)`. Unknown tool →
-  `Observation::Recoverable` (goal 13).
+  `spawn_blocking(move || registry.get(&cmd.name).map(|t| t.execute(&cmd.input)))`
+  (goal 7), which returns `Option<Result<Value, ToolError>>`. The brainstem maps the join:
+  `None` → `Observation::Recoverable(UnknownTool)`, `Some(Ok(v))` → `Observation::ToolResult`,
+  `Some(Err(e))` → `Observation::Recoverable(ToolFailed)`. _(The `None` and the `ToolError`
+  arms are **different** types — `RecoverableError::UnknownTool` vs `ToolError` — so they
+  cannot share a `Result` inside the closure; keep the lookup result as `Option<Result<…>>`
+  and split it in the brainstem, not in the closure. 001's `ToolRegistry` has
+  `get`/`register`/`schemas` but no `execute`; either add an `execute` helper or inline as
+  above — do not assume a pre-existing `registry.execute`.)_ Wrap the join in the same
+  cancel/status `select!`; result → `Observation`; `perception=Observation(obs)` (goal 13).
 - `Done(o)` → emit `TaskCompleted`, `task.reply.send(Completed(o))`, end episode.
 - `Failed(Task(f))` → emit `TaskFailed(f)`, reply `Failed(f)`, end episode —
   **service continues** (goal 10).
@@ -183,11 +197,14 @@ arm and the decide future borrow different fields. Then match the Decision:
 - `Throttle(t)` → `lifecycle=Throttling`, emit `ThrottleSleep{wake:t}`, then sleep in
   a **loop** that also services Status (goal 11/12 — a throttle may last hours; a Status
   query MUST NOT block on it):
-  `loop { select!{ cancel → return Cancelled, status_rx → reply(cached snapshot), sleep_until(t) → break } }`,
-  then re-decide with `Perception::Resume` (goal 9) — **not** the original perception, so
-  the mind does not re-fold it. No step consumed. _(Both fresh-eyes reviewers caught the
-  earlier two-arm `select!` omitting `status_rx`; the cached `Snapshot` already reflects
-  `Throttling`, so the reply is a disjoint-field borrow, never touching the budget mid-sleep.)_
+  `loop { select!{ cancel → return Cancelled, status_rx → reply(cached snapshot), sleep_until(t) → break } }`;
+  **on `break`, set `lifecycle = Working`** (the sleep is over — the next per-turn snapshot
+  refresh then re-caches `Working` *before* the `Resume` decide, so a Status during the
+  `Resume` decide reports `Working`, not a stale `Throttling`). Then re-decide with
+  `Perception::Resume` (goal 9) — **not** the original perception, so the mind does not
+  re-fold it. No step consumed. _(Both fresh-eyes reviewers caught the earlier two-arm
+  `select!` omitting `status_rx`; while `Throttling`, the cached `Snapshot` reply is a
+  disjoint-field borrow that never touches the budget mid-sleep.)_
 
 ## RunEvent (goal 17)
 
@@ -208,7 +225,7 @@ arm and the decide future borrow different fields. Then match the Decision:
 | 6,12 | cancel mid-sleep (cancel before advancing past wake) and mid-decide (pending FakeMind) → `Cancelled` |
 | 7 | two Tasks queued → two `TaskCompleted` events in order |
 | 8 | drop all inbox senders → `Stopped` |
-| 9 | Status query during Working → `Snapshot` with expected lifecycle/tokens/steps |
+| 9 | Status query during Working → `Snapshot` with expected lifecycle/tokens/steps. **Mid-throttle:** also send a Status query during a throttle sleep (before advancing the paused clock past `wake`) → assert `Snapshot{lifecycle: Throttling, next_reset: t}` — the only test that catches a throttle-sleep `select!` omitting the `status_rx` arm (goal 11/12) |
 | 10 | command for an unregistered tool → `Observation::Recoverable`, episode continues |
 | 11 | assert the event set is emitted across the above — **including** `WindowReset` (from SC 5's window roll) and `Recovered` (from SC 10's unknown tool), plus task-received/command/command-result/retry-scheduled/throttle-sleep/task-completed/failed/terminal |
 | 13 | **`max_tokens == 0`** (a window funding zero calls — the simplest deterministic trigger; see "When BudgetTooSmall actually fires"): assert **first** `decide` returns `Throttle` + `ThrottleSleep` emitted with **no provider call made**; advance clock past reset; **then** `decide(Resume)` against the fresh-but-still-zero window → `TaskFailed(BudgetTooSmall)`; service continues. (Asserting the intermediate `Throttle` rejects an impl that fails on first exhaustion, skipping the wait — goal 4 order.) |
@@ -216,7 +233,9 @@ arm and the decide future borrow different fields. Then match the Decision:
 ## Build order (commit per phase)
 
 - **P1** `budget.rs` renewable window + unit tests (window roll, saturating charge, `next_reset`, exhaustion).
-- **P2** `error.rs` classification + `ProviderError::Api{status}` + `provider/` update + tests.
+- **P2** `error.rs` classification + `ProviderError::Api{status}` + `provider/` update + tests
+  (incl. a unit test for the `_` unclassified-status arm: an unlisted 4xx → TaskFatal, an
+  unlisted 5xx → Transient — proves the match is total).
 - **P3** `mind/` types + `Mind` trait + `observation.rs` + `FakeMind` + tests.
 - **P4** `mind/model.rs` `ModelMind` (decide, classify/retry/backoff, malformed cap, throttle, BudgetTooSmall) + unit tests (`FakeProvider`, `start_paused`).
 - **P5** `brainstem/` `Brainstem::run` (idle/episode `select!`, pinned decide, `spawn_blocking` actuate, cancel, status, throttle) + `event.rs` + unit tests (`FakeMind`).

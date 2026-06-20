@@ -269,7 +269,10 @@ The agent reacts to these signals (handling defined above):
    emitted as an event.
 8. inbox closed → `Stopped`.
 9. A **Status** query returns a `Snapshot` with the correct lifecycle state,
-   tokens remaining, and steps used (verifies goal 12).
+   tokens remaining, and steps used (verifies goal 12) — including a query
+   **during a throttle sleep**, which **MUST** be answered (not blocked) and
+   **MUST** report `Throttling` (verifies goal 11's "concurrently with … the
+   throttle sleep").
 10. An **unknown command** yields a recoverable `Observation` and the episode
     continues (verifies goal 13's registry dispatch with no command-branching).
 11. The documented `RunEvent`s (goal 17) are emitted on their paths — at minimum
