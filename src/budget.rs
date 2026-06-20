@@ -185,11 +185,18 @@ impl BudgetState {
         temp.used >= budget.max_tokens
     }
 
-    /// When does the current window reset? start + (window + 1) * period
+    /// When does the current window reset? start + (window + 1) * period.
+    /// Uses u128 nanosecond arithmetic to avoid the silent truncation that
+    /// `Duration * u32` would force for large window indices (e.g.
+    /// `Period::Every(1ms)` overflows `u32` windows after ~49 days).
     pub fn next_reset(&self, now: Instant, budget: &RenewableBudget) -> Instant {
         let current_window = self.window(now, budget.period.duration());
-        let period_dur = budget.period.duration();
-        self.start + period_dur * (current_window as u32 + 1)
+        let reset_nanos = budget
+            .period
+            .duration()
+            .as_nanos()
+            .saturating_mul(current_window as u128 + 1);
+        self.start + Duration::from_nanos(reset_nanos.min(u64::MAX as u128) as u64)
     }
 }
 
@@ -399,6 +406,28 @@ mod tests {
         let now = Instant::now();
         let expected = state.start + Duration::from_secs(20);
         assert_eq!(state.next_reset(now, &budget), expected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn next_reset_does_not_truncate_large_window_index() {
+        // With a 1ms period the window index passes u32::MAX after ~49 days.
+        // The old `Duration * u32` cast truncated it and returned a past instant.
+        let start = Instant::now();
+        let budget = RenewableBudget {
+            period: Period::Every(Duration::from_millis(1)),
+            max_tokens: 100,
+        };
+        let mut state = BudgetState::new(start);
+
+        tokio::time::advance(Duration::from_millis(u32::MAX as u64 + 5)).await;
+        let now = Instant::now();
+        state.refresh(now, &budget);
+
+        let reset = state.next_reset(now, &budget);
+        assert!(
+            reset > now,
+            "next_reset must stay in the future past u32::MAX windows, not truncate to the past"
+        );
     }
 
     #[tokio::test(start_paused = true)]

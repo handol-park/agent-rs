@@ -45,6 +45,13 @@ impl ModelMind {
         }
     }
 
+    /// Override the backoff jitter seed. A seed of `0` disables jitter (exact
+    /// exponential delays) — used by tests to assert the backoff math.
+    pub fn with_jitter_seed(mut self, seed: u64) -> Self {
+        self.backoff_seed = seed;
+        self
+    }
+
     /// Fold a perception into working memory.
     fn fold(&mut self, perception: &Perception) {
         match perception {
@@ -482,13 +489,39 @@ mod tests {
             _ => panic!("a response with text and a tool call must return Act(CallTool)"),
         }
     }
-}
 
-#[allow(clippy::items_after_test_module)]
-impl ModelMind {
-    /// Set the backoff jitter seed for deterministic tests.
-    pub fn with_jitter_seed(mut self, seed: u64) -> Self {
-        self.backoff_seed = seed;
-        self
+    /// Spec goal 3 / SC 1: a body-`Decode` failure is transient and retried as a
+    /// **blind re-issue** — the retry must send the byte-identical request.
+    #[tokio::test(start_paused = true)]
+    async fn decode_retry_reissues_identical_request() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let provider = FakeProvider::new(vec![
+            Err(ProviderError::Decode("bad json".into())),
+            Ok(ModelResponse::text("ok")),
+        ]);
+        let seen = provider.requests_handle();
+
+        let mut mind = ModelMind::new(
+            Box::new(provider),
+            RenewableBudget::default(),
+            tx,
+            Duration::from_secs(10),
+        );
+
+        let decide_handle =
+            tokio::spawn(
+                async move { mind.decide(Perception::NewTask { goal: "g".into() }).await },
+            );
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let decision = decide_handle.await.unwrap();
+        assert!(matches!(decision, Decision::Done(_)));
+
+        let reqs = seen.lock().expect("not poisoned").clone();
+        assert_eq!(reqs.len(), 2, "Decode must trigger exactly one retry");
+        assert_eq!(
+            reqs[0], reqs[1],
+            "Decode retry must be a blind re-issue of the identical request"
+        );
     }
 }

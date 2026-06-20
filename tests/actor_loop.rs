@@ -496,6 +496,7 @@ async fn sc5_token_exhaustion_throttles_then_resumes_after_reset() {
         period: Period::Every(window),
         max_tokens: 10,
     };
+    let max_tokens = budget.max_tokens;
     let (mind, _cog_rx) = model_mind(
         vec![
             Ok(
@@ -533,9 +534,9 @@ async fn sc5_token_exhaustion_throttles_then_resumes_after_reset() {
     );
 
     let snap = h.snapshot().await;
-    assert!(
-        snap.tokens_remaining > 0,
-        "window reset must zero consumption"
+    assert_eq!(
+        snap.tokens_remaining, max_tokens,
+        "window reset must restore the full quota (consumption zeroed)"
     );
 
     h.cancel.cancel();
