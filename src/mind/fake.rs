@@ -12,6 +12,8 @@ use crate::mind::{Decision, Mind, Perception};
 pub struct FakeMind {
     script: Arc<Mutex<VecDeque<Decision>>>,
     budget_summary: BudgetSummary,
+    /// When true, `decide` never resolves (for the mid-decide cancellation test).
+    never_resolves: bool,
 }
 
 impl FakeMind {
@@ -20,6 +22,7 @@ impl FakeMind {
         Self {
             script: Arc::new(Mutex::new(script.into())),
             budget_summary,
+            never_resolves: false,
         }
     }
 
@@ -40,16 +43,22 @@ impl FakeMind {
         Self::with_script(script)
     }
 
-    /// Create a FakeMind that never completes decide (for cancellation tests).
-    /// Returns an empty script that will panic when decide is called.
+    /// Create a FakeMind whose `decide` never resolves (for the mid-decide
+    /// cancellation test, SC 12).
     pub fn pending() -> Self {
-        Self::with_script(Vec::new())
+        let mut mind = Self::with_script(Vec::new());
+        mind.never_resolves = true;
+        mind
     }
 }
 
 #[async_trait]
 impl Mind for FakeMind {
     async fn decide(&mut self, _perception: Perception) -> Decision {
+        if self.never_resolves {
+            // Park forever; the brainstem's select! cancels/answers Status around it.
+            std::future::pending::<()>().await;
+        }
         self.script
             .lock()
             .expect("not poisoned")
