@@ -5,10 +5,12 @@ pub mod model;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 
 use crate::budget::BudgetSummary;
 use crate::error::AgentError;
+use crate::event::RunEvent;
 use crate::observation::{Observation, Outcome};
 
 /// A perception passed to the mind: either a new task, an observation from the
@@ -77,4 +79,10 @@ pub trait Mind: Send + Sync {
 
     /// Read the budget summary (tokens remaining, next reset) as of the last decision.
     fn budget_summary(&self) -> BudgetSummary;
+
+    /// Inject the brainstem's `RunEvent` sink so cognitive events (`RetryScheduled`,
+    /// `WindowReset`) emitted *inside* a `decide` interleave on the brainstem's
+    /// single event stream (plan 002: both ends are producers on one channel).
+    /// The default is a no-op for minds (e.g. `FakeMind`) that emit nothing.
+    fn set_event_sink(&mut self, _events: UnboundedSender<RunEvent>) {}
 }

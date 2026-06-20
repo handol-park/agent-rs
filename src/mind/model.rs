@@ -226,15 +226,29 @@ impl Mind for ModelMind {
         let now = Instant::now();
         BudgetSummary::from_state(&self.budget_state, now, &self.budget)
     }
+
+    fn set_event_sink(&mut self, events: UnboundedSender<RunEvent>) {
+        self.event_tx = events;
+    }
 }
 
-/// Exponential backoff with full jitter: delay = random(0, min(cap, base * 2^attempt))
+/// Exponential backoff (goal 3): the uncapped target delay for retry `attempt`
+/// (1-based) is `base * multiplier^(attempt-1)`, capped at `cap`. With full
+/// jitter the actual delay is `random(0, capped)`. A `seed` of `0` disables
+/// jitter so the delay is exactly the capped target (used by tests to assert the
+/// exponential math deterministically).
 fn exponential_backoff(attempt: usize, base: Duration, cap: Duration, seed: u64) -> Duration {
-    let multiplier = 2u64.saturating_pow(attempt as u32);
+    let exponent = (attempt as u32).saturating_sub(1);
+    let multiplier = 2u64.saturating_pow(exponent);
     let delay_secs = base.as_secs().saturating_mul(multiplier);
     let capped = delay_secs.min(cap.as_secs());
 
-    // Full jitter: random in [0, capped]
+    if seed == 0 {
+        // No jitter: exact base * multiplier^(attempt-1), capped.
+        return Duration::from_secs(capped);
+    }
+
+    // Full jitter: random in [0, capped].
     let jittered = xorshift_range(seed.wrapping_add(attempt as u64), capped);
     Duration::from_secs(jittered)
 }

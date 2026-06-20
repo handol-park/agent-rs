@@ -58,15 +58,24 @@ struct BrainstemState {
     current_task: Option<String>,
     budget_summary: BudgetSummary,
     steps_used: usize,
+    /// Set while throttling: the instant the brainstem will wake. The reset that
+    /// the agent is actually waiting on (goal 12 reports the next reset instant).
+    throttle_wake: Option<Instant>,
 }
 
 impl BrainstemState {
     fn build_snapshot(&self) -> Snapshot {
+        // While throttling, the reset the agent is waiting on is the throttle
+        // wake instant, not the (stale) summary captured before the decide.
+        let next_reset = match (self.lifecycle, self.throttle_wake) {
+            (Lifecycle::Throttling, Some(wake)) => wake,
+            _ => self.budget_summary.next_reset,
+        };
         Snapshot {
             lifecycle: self.lifecycle,
             current_task: self.current_task.clone(),
             tokens_remaining: self.budget_summary.tokens_remaining,
-            next_reset: self.budget_summary.next_reset,
+            next_reset,
             queue_depth: 0,
             steps_used: self.steps_used,
         }
@@ -96,11 +105,17 @@ impl Brainstem {
 
     /// Run the perpetual drive loop until cancellation, fatal error, or inbox close.
     pub async fn run(mut self) -> Termination {
+        // Share the brainstem's single event stream with the mind so cognitive
+        // events (RetryScheduled, WindowReset) interleave with brainstem events
+        // (plan 002: both ends are producers on one channel).
+        self.mind.set_event_sink(self.event_tx.clone());
+
         let mut state = BrainstemState {
             lifecycle: Lifecycle::Idle,
             current_task: None,
             budget_summary: self.mind.budget_summary(),
             steps_used: 0,
+            throttle_wake: None,
         };
 
         loop {
@@ -246,7 +261,14 @@ impl Brainstem {
                     let _ = self.event_tx.send(RunEvent::CommandResult { call_id, ok });
 
                     if let Observation::Recoverable { error, .. } = &obs {
+                        // Emit both the 002 actor-agent variant (no step) and the
+                        // canonical `Recovered` event named in goal 17 / plan 002,
+                        // so consumers keying on either name observe this path.
                         let _ = self.event_tx.send(RunEvent::RecoverableObservation {
+                            error: error.clone(),
+                        });
+                        let _ = self.event_tx.send(RunEvent::Recovered {
+                            step: state.steps_used,
                             error: error.clone(),
                         });
                     }
@@ -264,6 +286,7 @@ impl Brainstem {
                 }
                 Decision::Throttle(wake) => {
                     state.lifecycle = Lifecycle::Throttling;
+                    state.throttle_wake = Some(wake);
                     let _ = self.event_tx.send(RunEvent::ThrottleSleep { wake });
 
                     // Sleep with cancel/status select
@@ -287,6 +310,7 @@ impl Brainstem {
                     }
 
                     state.lifecycle = Lifecycle::Working;
+                    state.throttle_wake = None;
                     perception = Perception::Resume;
                 }
             }
