@@ -531,4 +531,74 @@ mod tests {
             "Decode retry must be a blind re-issue of the identical request"
         );
     }
+
+    /// Spec 003 / SC 2 positive: `set_tools` schemas reach the provider request.
+    #[tokio::test]
+    async fn set_tools_schemas_reach_the_provider_request() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let provider = FakeProvider::new(vec![Ok(ModelResponse::text("computed"))]);
+        let seen = provider.requests_handle();
+
+        let mut mind = ModelMind::new(
+            Box::new(provider),
+            RenewableBudget::default(),
+            tx,
+            Duration::from_secs(10),
+        );
+
+        // Set tools from the default registry
+        let registry = crate::tool::default_registry();
+        mind.set_tools(registry.schemas());
+
+        let decision = mind
+            .decide(Perception::NewTask {
+                goal: "test".into(),
+            })
+            .await;
+        assert!(matches!(decision, Decision::Done(_)));
+
+        let reqs = seen.lock().expect("not poisoned").clone();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            !reqs[0].tools.is_empty(),
+            "request.tools must be non-empty after set_tools"
+        );
+        assert!(
+            reqs[0].tools.iter().any(|s| s.name == "calculator"),
+            "request.tools must contain the calculator schema"
+        );
+    }
+
+    /// Spec 003 / SC 2 negative: without `set_tools`, request advertises no tools.
+    #[tokio::test]
+    async fn without_set_tools_request_advertises_no_tools() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let provider = FakeProvider::new(vec![Ok(ModelResponse::text("done"))]);
+        let seen = provider.requests_handle();
+
+        let mut mind = ModelMind::new(
+            Box::new(provider),
+            RenewableBudget::default(),
+            tx,
+            Duration::from_secs(10),
+        );
+
+        // Do NOT call set_tools
+
+        let decision = mind
+            .decide(Perception::NewTask {
+                goal: "test".into(),
+            })
+            .await;
+        assert!(matches!(decision, Decision::Done(_)));
+
+        let reqs = seen.lock().expect("not poisoned").clone();
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            reqs[0].tools.is_empty(),
+            "request.tools must be empty when set_tools was never called"
+        );
+    }
 }
