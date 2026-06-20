@@ -76,9 +76,10 @@ issue #9.
     initial + retries — the assignment is inside the retry `loop`).
   - add a `#[cfg(test)]` unit test (C4) asserting that after `set_tools`, the
     request recorded by `FakeProvider::requests_handle()` carries the schemas.
-- `src/brainstem/mod.rs` — in `run()`, immediately after
-  `self.mind.set_tools(self.registry.schemas());` (C3, SC-3). `self.registry`
-  is `Arc<ToolRegistry>`; `schemas()` takes `&self`, so no ownership change.
+- `src/brainstem/mod.rs` — in `run()`, immediately after the existing
+  `set_event_sink` call, add `self.mind.set_tools(self.registry.schemas());`
+  (C3, SC-3). `self.registry` is `Arc<ToolRegistry>`; `schemas()` takes `&self`,
+  so no ownership change.
 
 ### Deleted files
 
