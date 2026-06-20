@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent::{
-    default_registry, FakeProvider, ModelMind, ModelResponse, Observation, Outcome,
-    RenewableBudget, RunEvent, Task, TaskOutcome, ToolRegistry,
+    default_registry, FakeProvider, ModelMind, ModelResponse, Outcome, RenewableBudget, RunEvent,
+    Task, TaskOutcome, ToolRegistry,
 };
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
@@ -151,24 +151,26 @@ async fn sc4_tool_schemas_advertised_and_tool_call_loop_works() {
             requests.len()
         );
 
+        // Assert schemas were injected (by name, not by registry size or exact
+        // description wording — those couple the test to unrelated changes; the
+        // schema's *shape* is already owned by tool/mod.rs's own test).
         let first_req = &requests[0];
-        assert_eq!(
-            first_req.tools.len(),
-            1,
-            "first request must advertise exactly 1 tool (calculator)"
+        assert!(
+            !first_req.tools.is_empty(),
+            "first request must advertise the registry's tool schemas"
         );
-        assert_eq!(
-            first_req.tools[0].name, "calculator",
-            "advertised tool must be the calculator"
+        assert!(
+            first_req.tools.iter().any(|t| t.name == "calculator"),
+            "advertised tools must include the calculator"
         );
-        assert_eq!(
-            first_req.tools[0].description,
-            "Evaluate a basic arithmetic expression (supports + - * /, parentheses).",
-            "schema description must match CalculatorTool::description"
-        );
+        let calculator = first_req
+            .tools
+            .iter()
+            .find(|t| t.name == "calculator")
+            .expect("calculator schema present");
         // Belt-and-suspenders: assert the schema has the 'expression' parameter.
         assert!(
-            first_req.tools[0]
+            calculator
                 .parameters
                 .get("properties")
                 .and_then(|p| p.get("expression"))
@@ -197,8 +199,3 @@ async fn sc4_tool_schemas_advertised_and_tool_call_loop_works() {
         agent::Termination::Cancelled
     ));
 }
-
-// Type anchors so Observation is referenced (keeps the import list honest for
-// the implementer).
-#[allow(dead_code)]
-fn _type_anchor(_: Observation) {}

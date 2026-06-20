@@ -212,7 +212,10 @@ impl Mind for ModelMind {
             if !response.tool_calls.is_empty() {
                 self.malformed_count = 0;
                 self.resuming = false;
-                // Return the first tool call as a command
+                // LIMITATION: only the first tool call is actuated. Providers can
+                // emit several tool calls in one turn, but `Decision::Act` carries a
+                // single `Command`, so the rest are dropped. Parallel/multiple tool
+                // calls per turn are explicitly out of scope for spec-002/003.
                 let tc = &response.tool_calls[0];
                 return Decision::Act(Command::CallTool {
                     call_id: tc.id.clone(),
