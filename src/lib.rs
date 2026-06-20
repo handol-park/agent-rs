@@ -8,6 +8,7 @@
 
 pub mod action;
 pub mod budget;
+pub mod brainstem;
 pub mod error;
 pub mod event;
 pub mod memory;
@@ -18,6 +19,7 @@ pub mod provider;
 pub mod tool;
 
 pub use action::{Action, ActionOutcome, RecoverableError};
+pub use brainstem::{Brainstem, Lifecycle, Snapshot, Task};
 pub use budget::{Budget, TerminalReason};
 pub use budget::{BudgetState, BudgetSummary, Period, RenewableBudget};
 pub use error::ErrorClass;
