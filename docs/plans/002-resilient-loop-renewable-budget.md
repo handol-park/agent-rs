@@ -70,15 +70,17 @@ pub enum Termination { Cancelled, Fatal(AgentError), Stopped }           // run-
 
 // budget.rs — pure fns of injected `now` (goal 15)
 pub enum Period { Daily, Weekly, Every(Duration) }                       // Daily=24h, Weekly=7d
+impl Period { fn duration(&self) -> Duration { Daily=>24h, Weekly=>7d, Every(d)=>*d } } // enums have no
+//      `.as_nanos()`; this helper supplies the window length used by window()/next_reset() below.
 pub struct Budget { pub period: Period, pub max_tokens: u64 }
 pub struct BudgetState { start: Instant, window: u64, used: u64 }
-//  window(now)= now.saturating_duration_since(start).as_nanos() / period.as_nanos()  // INTEGER
+//  window(now)= now.saturating_duration_since(start).as_nanos() / period.duration().as_nanos()  // INTEGER
 //      division (u128 nanos), not float — exact, idiomatic, auto-floors. saturating_duration_since,
 //      NOT `now - start` — direct Instant subtraction panics if now < start (possible under paused time);
 //  refresh(now) rolls window & zeroes `used` on crossing (goal 15);
 //  charge(now,t) = refresh then used = used.saturating_add(t)   // saturating — fixes the 001 overflow bug
 //  remaining(now), exhausted(now)= used >= max_tokens (a fresh window funds ≥1 call iff max_tokens>0),
-//  next_reset(now)=start+(window(now)+1)*period
+//  next_reset(now)= start + (window(now)+1) * period.duration()
 
 // error.rs — classification drives goal 3
 impl ProviderError { fn class(&self) -> ErrorClass } // Transient | ServiceFatal | TaskFatal
@@ -183,11 +185,14 @@ arm and the decide future borrow different fields. Then match the Decision:
   `spawn_blocking(move || registry.get(&cmd.name).map(|t| t.execute(&cmd.input)))`
   (goal 7), which returns `Option<Result<Value, ToolError>>`. The brainstem maps the join:
   `None` → `Observation::Recoverable(UnknownTool)`, `Some(Ok(v))` → `Observation::ToolResult`,
-  `Some(Err(e))` → `Observation::Recoverable(ToolFailed)`. _(The `None` and the `ToolError`
-  arms are **different** types — `RecoverableError::UnknownTool` vs `ToolError` — so they
-  cannot share a `Result` inside the closure; keep the lookup result as `Option<Result<…>>`
-  and split it in the brainstem, not in the closure. 001's `ToolRegistry` has
-  `get`/`register`/`schemas` but no `execute`; either add an `execute` helper or inline as
+  `Some(Err(e))` → `Observation::Recoverable(ToolFailed)`. **A panicking tool** makes
+  `spawn_blocking`'s `JoinHandle` resolve to `Err(JoinError)` — map that to
+  `Observation::Recoverable(ToolFailed)` too (a tool panic is a recoverable peripheral fault,
+  not a service-fatal one; goal 10/13 — the service keeps serving). _(The `None` and the
+  `ToolError` arms are **different** types — `RecoverableError::UnknownTool` vs `ToolError` —
+  so they cannot share a `Result` inside the closure; keep the lookup result as
+  `Option<Result<…>>` and split it in the brainstem, not in the closure. 001's `ToolRegistry`
+  has `get`/`register`/`schemas` but no `execute`; either add an `execute` helper or inline as
   above — do not assume a pre-existing `registry.execute`.)_ Wrap the join in the same
   cancel/status `select!`; result → `Observation`; `perception=Observation(obs)` (goal 13).
 - `Done(o)` → emit `TaskCompleted`, `task.reply.send(Completed(o))`, end episode.
@@ -196,8 +201,11 @@ arm and the decide future borrow different fields. Then match the Decision:
 - `Failed(Service(e))` → return `Termination::Fatal(e)` (ends the run).
 - `Throttle(t)` → `lifecycle=Throttling`, emit `ThrottleSleep{wake:t}`, then sleep in
   a **loop** that also services Status (goal 11/12 — a throttle may last hours; a Status
-  query MUST NOT block on it):
-  `loop { select!{ cancel → return Cancelled, status_rx → reply(cached snapshot), sleep_until(t) → break } }`;
+  query MUST NOT block on it). **Pin the timer once outside the loop** so a Status query
+  doesn't recreate it each iteration (`Sleep` is `!Unpin`; re-registering a timer per query
+  is wasteful): `let sleep = sleep_until(t); tokio::pin!(sleep);` then
+  `loop { biased select!{ cancel → return Cancelled, status_rx → reply(cached snapshot), &mut sleep → break } }`
+  (`biased`, matching the per-turn loop, so cancel wins over the timer when both are ready);
   **on `break`, set `lifecycle = Working`** (the sleep is over — the next per-turn snapshot
   refresh then re-caches `Working` *before* the `Resume` decide, so a Status during the
   `Resume` decide reports `Working`, not a stale `Throttling`). Then re-decide with

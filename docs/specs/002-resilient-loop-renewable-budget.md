@@ -37,12 +37,14 @@ marked "from 001."
 - **Task** — a unit of work pulled from the inbox: a goal plus optional metadata
   and an optional `oneshot` reply channel for its `TaskOutcome`.
 - **Perception** — the single stimulus passed to `Mind::decide`:
-  `Perception::Task(Task)` on the first decide of an episode (a new goal),
+  `Perception::NewTask { goal: String }` on the first decide of an episode (a new
+  goal — only the goal string, **not** the whole `Task`: the mind never holds the
+  reply channel, and `Perception` must be `Clone` whereas `oneshot::Sender` is not),
   `Perception::Observation(Observation)` on a subsequent decide, or
   `Perception::Resume` after a throttle (continue with the working memory
   unchanged — **no new stimulus**, so it is not folded; see goal 9). The brainstem
   passes only the latest stimulus, never the transcript; the mind accumulates
-  perceptions into its own working memory. A `Perception::Task` marks a new
+  perceptions into its own working memory. A `Perception::NewTask` marks a new
   episode and **resets** the mind's working memory.
 - **Command** — an intention the mind emits for the brainstem to actuate, e.g.
   `Command::CallTool { name, input }`. Dispatched through the peripheral registry.
@@ -134,7 +136,7 @@ marked "from 001."
    - a **peripheral registry** (001's `ToolRegistry`) and command execution;
    - a **cancellation token** and the drive loop.
 7. The drive loop **MUST**: pull a `Task`; run a **task episode** — pass
-   `Perception::Task` to `mind.decide`, then on `Act(cmd)` actuate via a
+   `Perception::NewTask { goal }` to `mind.decide`, then on `Act(cmd)` actuate via a
    peripheral and pass the resulting `Observation` back as
    `Perception::Observation`; on `Throttle(t)` wait until `t` (goal 9) and
    continue the same episode; on `Done`/`Failed` end the episode — then emit the
