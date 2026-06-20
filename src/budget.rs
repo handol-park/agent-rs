@@ -158,6 +158,12 @@ impl BudgetState {
         }
     }
 
+    /// The current window index (0-based), as of the last `refresh`/`charge`.
+    /// Used to label the `WindowReset` event (goal 17).
+    pub fn current_window(&self) -> u64 {
+        self.window
+    }
+
     /// Charge `tokens` to the current window (after refreshing). Saturating add to prevent overflow.
     pub fn charge(&mut self, now: Instant, budget: &RenewableBudget, tokens: u64) {
         self.refresh(now, budget);

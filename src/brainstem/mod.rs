@@ -248,7 +248,7 @@ impl Brainstem {
                     });
 
                     // Actuate command off-loop with spawn_blocking
-                    let obs = self.actuate_command(cmd).await?;
+                    let obs = self.actuate_command(cmd, state).await?;
 
                     let ok = matches!(obs, Observation::ToolResult { .. });
                     let call_id = match &obs {
@@ -317,8 +317,13 @@ impl Brainstem {
         }
     }
 
-    /// Actuate a command via spawn_blocking (tools are sync).
-    async fn actuate_command(&self, cmd: Command) -> Result<Observation, EpisodeFailure> {
+    /// Actuate a command via spawn_blocking (tools are sync). Services cancellation
+    /// and Status queries concurrently while the tool runs (spec goal 11).
+    async fn actuate_command(
+        &mut self,
+        cmd: Command,
+        state: &BrainstemState,
+    ) -> Result<Observation, EpisodeFailure> {
         let Command::CallTool {
             call_id,
             name,
@@ -330,7 +335,7 @@ impl Brainstem {
         let call_id_clone = call_id.clone();
 
         // spawn_blocking for sync tool execution
-        let handle = spawn_blocking(move || match registry.get(&name_clone) {
+        let mut handle = spawn_blocking(move || match registry.get(&name_clone) {
             None => Observation::Recoverable {
                 call_id: Some(call_id_clone),
                 error: RecoverableError::UnknownTool(name_clone),
@@ -350,25 +355,30 @@ impl Brainstem {
             },
         });
 
-        // Wait for join with cancel select
-        tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => {
-                Err(EpisodeFailure::Cancelled)
-            }
-            result = handle => {
-                match result {
-                    Ok(obs) => Ok(obs),
-                    Err(_join_err) => {
+        // Wait for join, servicing cancellation and Status queries concurrently so a
+        // long-running tool cannot block either (spec goal 11). `&mut handle` keeps
+        // the tool alive across Status replies (JoinHandle is Unpin).
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => {
+                    return Err(EpisodeFailure::Cancelled);
+                }
+                Some(reply_tx) = self.status_rx.recv() => {
+                    let _ = reply_tx.send(state.build_snapshot());
+                }
+                result = &mut handle => {
+                    return match result {
+                        Ok(obs) => Ok(obs),
                         // Tool panicked
-                        Ok(Observation::Recoverable {
+                        Err(_join_err) => Ok(Observation::Recoverable {
                             call_id: Some(call_id),
                             error: RecoverableError::ToolFailed {
                                 name,
                                 error: "tool panicked".to_string(),
                             },
-                        })
-                    }
+                        }),
+                    };
                 }
             }
         }

@@ -95,10 +95,14 @@ impl ModelMind {
                 tools: Vec::new(), // TODO: pass tool schemas
             };
 
+            // A timed-out call is itself a transient error (spec goal 3): flatten the
+            // `Result<Result<_, _>, Elapsed>` into the provider-error channel so the
+            // timeout falls into the `Err(e)` arm below and is retried — never
+            // propagated out of the retry loop.
             let result =
                 tokio::time::timeout(self.per_call_timeout, self.provider.complete(&request))
                     .await
-                    .map_err(|_| ProviderError::Transport("call timeout".into()))?;
+                    .unwrap_or_else(|_| Err(ProviderError::Transport("call timeout".into())));
 
             match result {
                 Ok(response) => return Ok(response),
@@ -142,7 +146,7 @@ impl Mind for ModelMind {
             // Check budget window refresh
             if self.budget_state.refresh(now, &self.budget) {
                 let _ = self.event_tx.send(RunEvent::WindowReset {
-                    window: 0, // We'd track actual window number in a full impl
+                    window: self.budget_state.current_window(),
                 });
             }
 
@@ -170,8 +174,13 @@ impl Mind for ModelMind {
                             Decision::Failed(Reason::Task(TaskFault::BadRequest(e.to_string())))
                         }
                         ErrorClass::Transient => {
-                            // Should never reach here (call_with_retry loops on transient)
-                            unreachable!("call_with_retry should loop on transient errors")
+                            // call_with_retry loops on transient errors, so this is
+                            // unreachable in correct operation. Fail the task rather
+                            // than panic — a perpetual service must never crash on a
+                            // logic slip (spec: errors are recoverable, not terminal).
+                            Decision::Failed(Reason::Task(TaskFault::BadRequest(format!(
+                                "transient error escaped retry loop: {e}"
+                            ))))
                         }
                     };
                 }
@@ -368,6 +377,71 @@ mod tests {
             })
             .await;
         assert!(matches!(decision, Decision::Throttle(_)));
+    }
+
+    /// A provider whose first call hangs past the per-call timeout, then succeeds.
+    /// `FakeProvider` returns instantly, so it cannot exercise the timeout path.
+    struct SlowThenFastProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::provider::Provider for SlowThenFastProvider {
+        async fn complete(
+            &self,
+            _request: &ModelRequest,
+        ) -> Result<crate::provider::ModelResponse, ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // Outlives the 10s per-call timeout; the timeout cancels this future.
+                sleep_until(Instant::now() + Duration::from_secs(30)).await;
+            }
+            Ok(ModelResponse::text("recovered"))
+        }
+    }
+
+    /// Spec goal 3: a timed-out provider call is transient and MUST be retried,
+    /// not propagated out of the retry loop (which previously hit `unreachable!`).
+    #[tokio::test(start_paused = true)]
+    async fn per_call_timeout_is_retried_as_transient() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let provider = SlowThenFastProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let mut mind = ModelMind::new(
+            Box::new(provider),
+            RenewableBudget {
+                period: crate::budget::Period::Daily,
+                max_tokens: 100_000,
+            },
+            tx,
+            Duration::from_secs(10), // per-call timeout < the 30s first call
+        );
+
+        let decide_handle = tokio::spawn(async move {
+            mind.decide(Perception::NewTask {
+                goal: "test".into(),
+            })
+            .await
+        });
+
+        tokio::time::advance(Duration::from_secs(120)).await;
+
+        let decision = decide_handle.await.unwrap();
+        assert!(
+            matches!(decision, Decision::Done(_)),
+            "a timed-out call must be retried to success, not panic"
+        );
+
+        let mut retries = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, RunEvent::RetryScheduled { .. }) {
+                retries += 1;
+            }
+        }
+        assert!(retries >= 1, "the timed-out call must schedule a retry");
     }
 }
 
