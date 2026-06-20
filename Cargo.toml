@@ -15,6 +15,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
+# Required by tests/actor_loop.rs (CancellationToken). The brainstem impl (plan
+# 002) promotes this to a regular dependency when it lands.
+tokio-util = "0.7"
 
 [[example]]
 name = "run"
