@@ -74,8 +74,10 @@ issue #9.
   - in `call_with_retry`, replace `tools: Vec::new(), // TODO: pass tool schemas`
     with `tools: self.tools.clone()` (C2, SC-2: included in every request,
     initial + retries — the assignment is inside the retry `loop`).
-  - add a `#[cfg(test)]` unit test (C4) asserting that after `set_tools`, the
-    request recorded by `FakeProvider::requests_handle()` carries the schemas.
+  - add two `#[cfg(test)]` unit tests (C4): a positive test asserting that after
+    `set_tools`, the request recorded by `FakeProvider::requests_handle()`
+    carries the schemas, and a negative test asserting a never-injected
+    `ModelMind` still sends an empty `tools` vec (see Test Strategy).
 - `src/brainstem/mod.rs` — in `run()`, immediately after the existing
   `set_event_sink` call, add `self.mind.set_tools(self.registry.schemas());`
   (C3, SC-3). `self.registry` is `Arc<ToolRegistry>`; `schemas()` takes `&self`,
