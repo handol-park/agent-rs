@@ -22,7 +22,7 @@ pub use budget::{Budget, TerminalReason};
 pub use budget::{BudgetState, BudgetSummary, Period, RenewableBudget};
 pub use error::ErrorClass;
 pub use error::{AgentError, PlannerError, ProviderError, ToolError};
-pub use event::RunEvent;
+pub use event::{RunEvent, Termination};
 pub use memory::{Memory, MemorySnapshot, Record};
 pub use mind::fake::FakeMind;
 pub use mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
