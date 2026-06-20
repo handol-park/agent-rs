@@ -25,6 +25,7 @@ pub use error::{AgentError, PlannerError, ProviderError, ToolError};
 pub use event::{RunEvent, Termination};
 pub use memory::{Memory, MemorySnapshot, Record};
 pub use mind::fake::FakeMind;
+pub use mind::model::ModelMind;
 pub use mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
 pub use observation::{Observation, Outcome, TaskOutcome};
 pub use planner::{model::ModelPlanner, rule::RulePlanner};

@@ -1,6 +1,7 @@
 //! Mind trait and cognitive types (spec 002 goals 1-5).
 
 pub mod fake;
+pub mod model;
 
 use async_trait::async_trait;
 use serde_json::Value;
