@@ -139,11 +139,10 @@ impl BudgetState {
         let elapsed = now.saturating_duration_since(self.start);
         let elapsed_nanos = elapsed.as_nanos();
         let period_nanos = period_duration.as_nanos();
-        if period_nanos == 0 {
-            0 // avoid division by zero
-        } else {
-            (elapsed_nanos / period_nanos) as u64
-        }
+        elapsed_nanos
+            .checked_div(period_nanos)
+            .map(|w| w as u64)
+            .unwrap_or(0)
     }
 
     /// Refresh: if we've crossed into a new window since the last check, reset consumption.

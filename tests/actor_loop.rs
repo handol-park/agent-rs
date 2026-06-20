@@ -195,10 +195,15 @@ async fn sc1_transient_503_retries_with_backoff_then_proceeds() {
         .iter()
         .filter(|e| matches!(e, RunEvent::RetryScheduled { .. }))
         .count();
-    assert_eq!(retries, 2, "one RetryScheduled per transient attempt: {events:?}");
+    assert_eq!(
+        retries, 2,
+        "one RetryScheduled per transient attempt: {events:?}"
+    );
 
     assert!(
-        !events.iter().any(|e| matches!(e, RunEvent::Terminated { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, RunEvent::Terminated { .. })),
         "service must not terminate on a transient error"
     );
 
@@ -222,8 +227,7 @@ async fn sc1_backoff_is_exponential() {
     ]);
     let (cog_tx, mut cog_rx) = mpsc::unbounded_channel::<RunEvent>();
     // Zero jitter so the delays are exactly base * mult^n.
-    let mut mind =
-        ModelMind::new(Box::new(provider), ample_budget(), cog_tx).with_jitter_seed(0);
+    let mut mind = ModelMind::new(Box::new(provider), ample_budget(), cog_tx).with_jitter_seed(0);
 
     let decide =
         tokio::spawn(async move { mind.decide(Perception::NewTask { goal: "g".into() }).await });
@@ -238,7 +242,10 @@ async fn sc1_backoff_is_exponential() {
 
     // Advancing by < 1s yields no second retry yet.
     tokio::time::advance(Duration::from_millis(900)).await;
-    assert!(cog_rx.try_recv().is_err(), "retry 2 must not fire before its delay");
+    assert!(
+        cog_rx.try_recv().is_err(),
+        "retry 2 must not fire before its delay"
+    );
 
     // Advancing past 1s lets retry 2 schedule, with delay ~2s (exponential).
     tokio::time::advance(Duration::from_millis(200)).await;
@@ -247,7 +254,11 @@ async fn sc1_backoff_is_exponential() {
         unreachable!()
     };
     assert_eq!(attempt, 2);
-    assert_eq!(delay, Duration::from_secs(2), "delay must double (exponential)");
+    assert_eq!(
+        delay,
+        Duration::from_secs(2),
+        "delay must double (exponential)"
+    );
 
     tokio::time::advance(Duration::from_secs(2)).await;
     let decision = decide.await.unwrap();
@@ -279,10 +290,14 @@ async fn sc1_decode_error_is_transient_blind_reissue() {
     );
     let events = h.drain_events();
     assert!(
-        events.iter().any(|e| matches!(e, RunEvent::RetryScheduled { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, RunEvent::RetryScheduled { .. })),
         "Decode must emit a retry (blind re-issue): {events:?}"
     );
-    assert!(!events.iter().any(|e| matches!(e, RunEvent::TaskFailed { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, RunEvent::TaskFailed { .. })));
 
     h.cancel.cancel();
     let _ = h.join.await;
@@ -311,11 +326,16 @@ async fn sc2_service_fatal_401_terminates_fatal() {
     h.inbox.send(t).await.unwrap();
 
     let term = h.join.await.unwrap();
-    assert!(matches!(term, Termination::Fatal(_)), "401 must be service-fatal");
+    assert!(
+        matches!(term, Termination::Fatal(_)),
+        "401 must be service-fatal"
+    );
 
     let events = h.drain_events();
     assert!(
-        !events.iter().any(|e| matches!(e, RunEvent::RetryScheduled { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, RunEvent::RetryScheduled { .. })),
         "service-fatal must not retry"
     );
     assert!(events.iter().any(|e| matches!(
@@ -386,7 +406,9 @@ async fn sc3_step_liveness_trip_is_task_fatal() {
             reason: TaskFault::NoProgress
         }
     )));
-    assert!(!events.iter().any(|e| matches!(e, RunEvent::Terminated { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, RunEvent::Terminated { .. })));
 
     h.cancel.cancel();
     assert!(matches!(h.join.await.unwrap(), Termination::Cancelled));
@@ -410,7 +432,11 @@ async fn sc4_two_malformed_recovered_third_is_task_fatal() {
 
     // Two malformed then a recovery -> the episode proceeds (task done).
     let (mind, _cog_rx) = model_mind(
-        vec![malformed(), malformed(), Ok(ModelResponse::text("recovered after 2"))],
+        vec![
+            malformed(),
+            malformed(),
+            Ok(ModelResponse::text("recovered after 2")),
+        ],
         ample_budget(),
     );
     let mut h = spawn(BrainstemConfig {
@@ -428,8 +454,7 @@ async fn sc4_two_malformed_recovered_third_is_task_fatal() {
     let _ = h.join.await;
 
     // Three malformed -> task-fatal Malformed, service continues.
-    let (mind3, _cog_rx3) =
-        model_mind(vec![malformed(), malformed(), malformed()], ample_budget());
+    let (mind3, _cog_rx3) = model_mind(vec![malformed(), malformed(), malformed()], ample_budget());
     let mut h3 = spawn(BrainstemConfig {
         mind: mind3,
         registry: registry(),
@@ -442,7 +467,9 @@ async fn sc4_two_malformed_recovered_third_is_task_fatal() {
         other => panic!("third malformed must be task-fatal Malformed, got {other:?}"),
     }
     let events = h3.drain_events();
-    assert!(!events.iter().any(|e| matches!(e, RunEvent::Terminated { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, RunEvent::Terminated { .. })));
     h3.cancel.cancel();
     assert!(matches!(h3.join.await.unwrap(), Termination::Cancelled));
 }
@@ -486,16 +513,23 @@ async fn sc5_token_exhaustion_throttles_then_resumes_after_reset() {
 
     let events = h.drain_events();
     assert!(
-        events.iter().any(|e| matches!(e, RunEvent::ThrottleSleep { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, RunEvent::ThrottleSleep { .. })),
         "exhaustion must throttle-sleep: {events:?}"
     );
     assert!(
-        events.iter().any(|e| matches!(e, RunEvent::WindowReset { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, RunEvent::WindowReset { .. })),
         "crossing the window boundary must emit WindowReset: {events:?}"
     );
 
     let snap = h.snapshot().await;
-    assert!(snap.tokens_remaining > 0, "window reset must zero consumption");
+    assert!(
+        snap.tokens_remaining > 0,
+        "window reset must zero consumption"
+    );
 
     h.cancel.cancel();
     assert!(matches!(h.join.await.unwrap(), Termination::Cancelled));
@@ -521,7 +555,9 @@ async fn sc6_cancel_mid_sleep_wins_over_timer() {
 
     tokio::task::yield_now().await;
     let events = h.drain_events();
-    assert!(events.iter().any(|e| matches!(e, RunEvent::ThrottleSleep { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RunEvent::ThrottleSleep { .. })));
 
     h.cancel.cancel();
     assert!(matches!(h.join.await.unwrap(), Termination::Cancelled));
@@ -625,7 +661,10 @@ async fn sc9_status_while_working_reports_lifecycle_and_steps() {
     h.inbox.send(t).await.unwrap();
 
     let snap = h.snapshot().await;
-    assert!(matches!(snap.lifecycle, Lifecycle::Working | Lifecycle::Idle));
+    assert!(matches!(
+        snap.lifecycle,
+        Lifecycle::Working | Lifecycle::Idle
+    ));
     if snap.lifecycle == Lifecycle::Working {
         assert_eq!(snap.current_task.as_deref(), Some("status me"));
     }
@@ -723,15 +762,27 @@ async fn sc11_event_set_is_emitted_on_its_paths() {
     let events = h.drain_events();
     let has = |pred: fn(&RunEvent) -> bool| events.iter().any(pred);
 
-    assert!(has(|e| matches!(e, RunEvent::TaskReceived { .. })), "TaskReceived");
+    assert!(
+        has(|e| matches!(e, RunEvent::TaskReceived { .. })),
+        "TaskReceived"
+    );
     assert!(has(|e| matches!(e, RunEvent::Command { .. })), "Command");
-    assert!(has(|e| matches!(e, RunEvent::CommandResult { .. })), "CommandResult");
+    assert!(
+        has(|e| matches!(e, RunEvent::CommandResult { .. })),
+        "CommandResult"
+    );
     assert!(
         has(|e| matches!(e, RunEvent::Recovered { .. })),
         "Recovered (unknown tool)"
     );
-    assert!(has(|e| matches!(e, RunEvent::TaskCompleted { .. })), "TaskCompleted");
-    assert!(has(|e| matches!(e, RunEvent::Terminated { .. })), "Terminated");
+    assert!(
+        has(|e| matches!(e, RunEvent::TaskCompleted { .. })),
+        "TaskCompleted"
+    );
+    assert!(
+        has(|e| matches!(e, RunEvent::Terminated { .. })),
+        "Terminated"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -806,11 +857,17 @@ async fn sc13_zero_quota_through_brainstem_throttles_then_fails_and_continues() 
 
     let events = h.drain_events();
     assert!(
-        events.iter().any(|e| matches!(e, RunEvent::ThrottleSleep { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, RunEvent::ThrottleSleep { .. })),
         "zero-quota must throttle first (goal 4 order): {events:?}"
     );
-    assert!(!events.iter().any(|e| matches!(e, RunEvent::RetryScheduled { .. })));
-    assert!(!events.iter().any(|e| matches!(e, RunEvent::Terminated { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, RunEvent::RetryScheduled { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, RunEvent::Terminated { .. })));
 
     h.cancel.cancel();
     assert!(matches!(h.join.await.unwrap(), Termination::Cancelled));
