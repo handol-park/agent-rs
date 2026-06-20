@@ -1,0 +1,26 @@
+# han-review caller stub — installed by `han-review-init`.
+#
+# On-demand multi-angle PR review. Comment one of the following on a PR:
+#   @claude review      — review with Claude
+#   @codex review       — review with Codex
+#   @gemini-cli /review — review with Gemini
+#
+# Requires the matching secret in this repo:
+#   CLAUDE_CODE_OAUTH_TOKEN | OPENAI_API_KEY | GEMINI_API_KEY
+# All review logic lives in handol-park/han-review (pinned by @ref below).
+name: han-review
+on:
+  issue_comment:
+    types: [created]
+# A reusable workflow can't escalate beyond the caller's token, and many repos
+# default to read-only. Grant here so the review can post its comment.
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+  actions: read
+jobs:
+  review:
+    uses: handol-park/han-review/.github/workflows/review.yml@v1
+    secrets: inherit
