@@ -75,7 +75,10 @@ impl Provider for OpenAiProvider {
             .await
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         if !status.is_success() {
-            return Err(ProviderError::Api(format!("{status}: {text}")));
+            return Err(ProviderError::Api {
+                status: status.as_u16(),
+                body: text,
+            });
         }
         parse_response(&text)
     }

@@ -42,7 +42,12 @@ impl Provider for FakeProvider {
             .lock()
             .expect("not poisoned")
             .pop_front()
-            .unwrap_or_else(|| Err(ProviderError::Api("FakeProvider script exhausted".into())))
+            .unwrap_or_else(|| {
+                Err(ProviderError::Api {
+                    status: 500,
+                    body: "FakeProvider script exhausted".into(),
+                })
+            })
     }
 }
 
