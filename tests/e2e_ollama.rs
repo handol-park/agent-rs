@@ -50,6 +50,13 @@ const FACTOR_B: i64 = 5678;
 /// the final answer regardless of separators the model might insert (e.g. commas).
 const PRODUCT_DIGITS: &str = "7006652";
 
+/// Upper bound on how long a single task may take before the harness gives up.
+/// `ModelMind` retries transient provider errors with *unbounded* exponential
+/// backoff, so a wedged or unreachable backend would otherwise hang the test
+/// forever. Generous on purpose: it must clear the mind's own 120s per-call
+/// timeout plus a few retries, so only a genuinely stuck run trips it.
+const RUN_TASK_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Build a provider from `LLM_*`, or skip the test (returns from the caller) when
 /// no backend is configured. Mirrors `OpenAiProvider::from_env`'s contract: all
 /// three of `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` must be set.
@@ -94,7 +101,10 @@ impl E2eHandle {
             })
             .await
             .expect("brainstem inbox open");
-        reply_rx.await.expect("brainstem replied")
+        tokio::time::timeout(RUN_TASK_TIMEOUT, reply_rx)
+            .await
+            .expect("task timed out — backend unreachable or wedged in retry backoff?")
+            .expect("brainstem replied")
     }
 
     /// Query `Status` and await the `Snapshot` reply.
