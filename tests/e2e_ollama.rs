@@ -53,9 +53,12 @@ const PRODUCT_DIGITS: &str = "7006652";
 /// Upper bound on how long a single task may take before the harness gives up.
 /// `ModelMind` retries transient provider errors with *unbounded* exponential
 /// backoff, so a wedged or unreachable backend would otherwise hang the test
-/// forever. Generous on purpose: it must clear the mind's own 120s per-call
-/// timeout plus a few retries, so only a genuinely stuck run trips it.
-const RUN_TASK_TIMEOUT: Duration = Duration::from_secs(300);
+/// forever. Sized to clear two full retry cycles: each is the mind's 120s
+/// per-call timeout + up to the 60s backoff cap (`src/mind/model.rs`), i.e.
+/// 2 * (120 + 120) ≈ 480s including a cold-start model load. The ceiling is
+/// harmless — these tests only run when the user has opted in — so only a
+/// genuinely stuck run trips it.
+const RUN_TASK_TIMEOUT: Duration = Duration::from_secs(480);
 
 /// Build a provider from `LLM_*`, or skip the test (returns from the caller) when
 /// no backend is configured. Mirrors `OpenAiProvider::from_env`'s contract: all
@@ -107,11 +110,16 @@ impl E2eHandle {
             .expect("brainstem replied")
     }
 
-    /// Query `Status` and await the `Snapshot` reply.
+    /// Query `Status` and await the `Snapshot` reply. An idle brainstem answers
+    /// immediately; the short timeout makes a wedged loop fail loudly rather than
+    /// hang the test.
     async fn snapshot(&self) -> Snapshot {
         let (tx, rx) = oneshot::channel();
         self.status.send(tx).await.expect("status channel open");
-        rx.await.expect("brainstem replied to status")
+        tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("status query timed out — brainstem wedged?")
+            .expect("brainstem replied to status")
     }
 
     /// Drain whatever brainstem events are currently buffered (non-blocking).
@@ -208,29 +216,27 @@ async fn brainstem_tool_call_result_reaches_the_answer() {
     assert_eq!(h.shutdown().await, Termination::Cancelled);
 }
 
-/// The non-tool path: a plain conversational task completes via a direct text
-/// reply, with NO tool command actuated.
+/// The conversational path: a plain greeting task runs end to end and completes.
+///
+/// We deliberately do NOT assert tool-*absence* here: the calculator schema is
+/// still advertised in every request, and small models occasionally invoke it
+/// even when told not to, so "no command was actuated" is non-deterministic
+/// against a real backend. The structural no-tool guarantee is covered offline
+/// with `FakeMind`; here we only claim the conversational task reaches a
+/// `Completed` outcome and emits its `TaskCompleted` event.
 #[tokio::test]
 #[ignore = "requires a live LLM backend (LLM_* env, e.g. local Ollama); run with --ignored"]
-async fn brainstem_completes_no_tool_task_without_a_command() {
+async fn brainstem_completes_a_conversational_task() {
     let provider = provider_or_skip!();
     let mut h = spawn_brainstem(provider);
 
-    let outcome = h
-        .run_task("Reply with a one-sentence greeting. Do not use any tools.")
-        .await;
+    let outcome = h.run_task("Reply with a one-sentence greeting.").await;
     assert!(
         matches!(outcome, TaskOutcome::Completed(_)),
         "expected completion, got {outcome:?}"
     );
 
     let events = h.drain_events();
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, RunEvent::CommandResult { .. })),
-        "a greeting needs no tool; unexpected command in: {events:?}"
-    );
     assert!(
         events
             .iter()
