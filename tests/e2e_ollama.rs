@@ -53,11 +53,11 @@ const PRODUCT_DIGITS: &str = "7006652";
 /// Upper bound on how long a single task may take before the harness gives up.
 /// `ModelMind` retries transient provider errors with *unbounded* exponential
 /// backoff, so a wedged or unreachable backend would otherwise hang the test
-/// forever. Sized to clear two full retry cycles: each is the mind's 120s
-/// per-call timeout + up to the 60s backoff cap (`src/mind/model.rs`), i.e.
-/// 2 * (120 + 120) ≈ 480s including a cold-start model load. The ceiling is
-/// harmless — these tests only run when the user has opted in — so only a
-/// genuinely stuck run trips it.
+/// forever. Sized to clear two full retry cycles: with the mind's 120s
+/// per-call timeout and up to the 60s backoff cap (`src/mind/model.rs`), that
+/// is 3 calls * 120s + 2 backoffs * 60s = 480s, with room for a cold-start
+/// model load. The ceiling is harmless — these tests only run when the user
+/// has opted in — so only a genuinely stuck run trips it.
 const RUN_TASK_TIMEOUT: Duration = Duration::from_secs(480);
 
 /// Build a provider from `LLM_*`, or skip the test (returns from the caller) when
