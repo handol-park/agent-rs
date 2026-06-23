@@ -8,8 +8,6 @@ use tokio::time::Instant;
 pub enum Period {
     /// 24 hours.
     Daily,
-    /// 7 days.
-    Weekly,
     /// Custom period.
     Every(Duration),
 }
@@ -19,7 +17,6 @@ impl Period {
     pub fn duration(&self) -> Duration {
         match self {
             Period::Daily => Duration::from_secs(24 * 60 * 60),
-            Period::Weekly => Duration::from_secs(7 * 24 * 60 * 60),
             Period::Every(d) => *d,
         }
     }

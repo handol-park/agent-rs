@@ -9,8 +9,7 @@ use tokio::time::Instant;
 
 use crate::error::ProviderError;
 use crate::mind::TaskFault;
-use crate::observation::Outcome;
-use crate::recoverable::RecoverableError;
+use crate::observation::{Outcome, RecoverableError};
 
 /// One observable moment in a run, emitted in order.
 #[derive(Debug, Clone, PartialEq)]
