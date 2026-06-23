@@ -39,3 +39,4 @@ v0.2 — Mind + Brainstem actor service. Features: OpenAI-compatible provider,
 tool registry, renewable token budgets, event stream, transient-error retry with
 backoff, throttle-on-exhaustion. Out of scope for now: streaming, multi-agent,
 MCP, persistence.
+
