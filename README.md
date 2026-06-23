@@ -1,8 +1,8 @@
 # agent-rs
 
-A small, production-shaped Rust crate for running an LLM agent loop:
-**perceive → plan → act → observe**, with recoverable errors, native LLM
-tool-use, and budgets/observability built in from the start.
+A small, production-shaped Rust crate for running an LLM agent as a service:
+**Mind + Brainstem** — cognition and runtime are split. The `Brainstem` drives a
+perpetual task loop; `Mind` owns the LLM provider and resilience logic.
 
 It is the "done right" successor to the [`agy`](../agy) learning project. The
 defining difference: a tool failure or malformed model response is recorded as a
@@ -14,8 +14,8 @@ never silently turned into a successful finish.
 The Rust toolchain comes from the Nix dev shell:
 
 ```bash
-nix develop -c make check                 # fmt --check + clippy -D warnings + test
-nix develop -c cargo run --example run    # one agent turn (RulePlanner with no API key)
+nix develop -c make check                     # fmt --check + clippy -D warnings + test
+nix develop -c cargo run --example service    # end-to-end actor service wiring
 ```
 
 Point it at a real provider via env:
@@ -24,16 +24,17 @@ Point it at a real provider via env:
 export LLM_BASE_URL=https://api.openai.com/v1
 export LLM_API_KEY=sk-...
 export LLM_MODEL=gpt-4o-mini
-nix develop -c cargo run --example run
+nix develop -c cargo run --example service
 ```
 
 ## Design
 
-See `AGENTS.md` for principles and the module map, `docs/specs/001-agent-core.md`
-for the contract, and `docs/plans/001-agent-core.md` for the implementation plan.
+See `AGENTS.md` for principles and the module map, `docs/specs/002-actor-service.md`
+for the contract, and `docs/plans/002-actor-service.md` for the implementation plan.
 
 ## Status
 
-v0.1 — core loop, OpenAI-compatible provider, tool registry, budgets, event
-stream. Out of scope for now: streaming, multi-agent, MCP, persistence beyond an
-in-memory snapshot.
+v0.2 — Mind + Brainstem actor service. Features: OpenAI-compatible provider,
+tool registry, renewable token budgets, event stream, transient-error retry with
+backoff, throttle-on-exhaustion. Out of scope for now: streaming, multi-agent,
+MCP, persistence.
