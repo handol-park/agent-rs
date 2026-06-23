@@ -5,9 +5,10 @@ A small, production-shaped Rust crate for running an LLM agent as a service:
 perpetual task loop; `Mind` owns the LLM provider and resilience logic.
 
 It is the "done right" successor to the [`agy`](../agy) learning project. The
-defining difference: a tool failure or malformed model response is recorded as a
-`RecoverableError` and fed back into the loop so the model can correct — it is
-never silently turned into a successful finish.
+defining difference: errors are recoverable observations, not terminal states — a
+tool failure is fed back to the model as a `RecoverableError` so it can correct,
+and a malformed model response gets up to two re-prompts before failing the task.
+Nothing is silently turned into a successful finish.
 
 ## Quick start
 
@@ -29,8 +30,8 @@ nix develop -c cargo run --example service
 
 ## Design
 
-See `AGENTS.md` for principles and the module map, `docs/specs/002-actor-service.md`
-for the contract, and `docs/plans/002-actor-service.md` for the implementation plan.
+See `AGENTS.md` for principles and the module map, `docs/specs/002-resilient-loop-renewable-budget.md`
+for the contract, and `docs/plans/002-resilient-loop-renewable-budget.md` for the implementation plan.
 
 ## Status
 

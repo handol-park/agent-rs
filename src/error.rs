@@ -1,6 +1,6 @@
 //! Explicit error types. No `Box<dyn Error>` — every failure is a typed enum so
 //! the loop can classify it (fatal vs recoverable). Recoverable *domain* values
-//! live in [`crate::action::RecoverableError`]; this module holds the `Result`
+//! live in [`crate::recoverable::RecoverableError`]; this module holds the `Result`
 //! error types returned by providers and tools.
 
 use thiserror::Error;
