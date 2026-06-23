@@ -262,7 +262,7 @@ fn parse_response(body: &str) -> Result<ModelResponse, ProviderError> {
             id: tc.id,
             name: tc.function.name,
             // OpenAI encodes arguments as a JSON string; on garbage, fall back to
-            // Null so the planner surfaces it as a recoverable malformed plan.
+            // Null so the mind observes it as a recoverable unknown-argument error.
             arguments: serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null),
         })
         .collect();

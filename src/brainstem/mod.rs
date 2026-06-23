@@ -6,11 +6,11 @@ use tokio::task::spawn_blocking;
 use tokio::time::{sleep_until, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::action::RecoverableError;
 use crate::budget::BudgetSummary;
 use crate::event::{RunEvent, Termination};
 use crate::mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
 use crate::observation::{Observation, Outcome, TaskOutcome};
+use crate::recoverable::RecoverableError;
 use crate::tool::ToolRegistry;
 
 /// A task submitted to the brainstem's inbox.

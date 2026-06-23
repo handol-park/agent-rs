@@ -6,9 +6,8 @@ Guidance for Claude Code when working in this repository.
 
 `agent-rs` is a production-shaped Rust agent framework: a bounded perceive →
 plan → act → observe loop over a pluggable `Provider` (LLM) and a typed
-`ToolRegistry`. It is the "done right" successor to the `agy` learning project —
-the key improvement is that **errors are recoverable observations, not terminal
-states**.
+`ToolRegistry`. The active architecture is v0.2 (Mind + Brainstem): an actor
+service with a `Mind` for cognition and a `Brainstem` for the runtime drive loop.
 
 ## Build & verify
 
@@ -45,10 +44,6 @@ nix develop -c cargo test --test e2e_ollama -- --ignored --nocapture
 
 ## Architecture
 
-The crate carries two generations. **v0.2 (the actor service, spec 002)
-supersedes v0.1's single `Agent::run` loop** and is the path to build on; v0.1
-is kept for reference and the `examples/run.rs` demo.
-
 **v0.2 — Mind + Brainstem.** Cognition and runtime are split:
 
 - **Mind** (`src/mind/`) is cognition. `Mind::decide(Perception) -> Decision`
@@ -73,16 +68,11 @@ Supporting modules: `src/budget.rs` (renewable window — `Period`,
 (`ProviderError::Api{status}` + `ErrorClass` classification), and `RunEvent`
 extensions in `src/event.rs` (`TaskReceived`/`Command`/`CommandResult`/
 `RetryScheduled`/`WindowReset`/`ThrottleSleep`/`TaskCompleted`/`TaskFailed`/
-`Recovered`/`Terminated`). See `examples/service.rs` for end-to-end wiring.
+`RecoverableObservation`/`Terminated`). See `examples/service.rs` for end-to-end wiring.
 
-**v0.1 — `Agent::run`** (`src/lib.rs`): a bounded loop. Each step checks budgets
-→ builds a `PlanContext` → `Planner::plan_next` (wall-clock `timeout`) → executes
-each `Action` via `ToolRegistry` → records `ActionOutcome`s into `Memory` → emits
-`RunEvent`s. Terminates on `Finish`, budget exhaustion, timeout, or fatal error.
-
-Runtime dispatch: `Provider`, `Planner`, and `Mind` are `#[async_trait]` trait
-objects (`Box<dyn>`), selected from env at startup. `Tool` is sync. See
-`AGENTS.md` for the module map and `docs/` for spec + plan.
+Runtime dispatch: `Provider` and `Mind` are `#[async_trait]` trait objects
+(`Box<dyn>`), selected from env at startup. `Tool` is sync. See `AGENTS.md`
+for the module map and `docs/` for spec + plan.
 
 ## Non-negotiables
 

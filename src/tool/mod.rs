@@ -24,7 +24,7 @@ pub trait Tool: Send + Sync {
     fn execute(&self, input: &Value) -> Result<Value, ToolError>;
 }
 
-/// A tool's advertised contract, handed to the planner so the model knows what
+/// A tool's advertised contract, handed to the mind so the model knows what
 /// it can call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSchema {

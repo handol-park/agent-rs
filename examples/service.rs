@@ -4,7 +4,7 @@
 //!
 //! With `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` set it drives a real model
 //! (`ModelMind`); otherwise it falls back to a scripted `FakeMind` so the demo
-//! runs fully offline — same pattern as `examples/run.rs`.
+//! runs fully offline.
 //!
 //!   nix develop -c cargo run --example service
 

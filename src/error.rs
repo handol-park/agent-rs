@@ -1,7 +1,7 @@
 //! Explicit error types. No `Box<dyn Error>` — every failure is a typed enum so
 //! the loop can classify it (fatal vs recoverable). Recoverable *domain* values
-//! live in [`crate::action::RecoverableError`]; this module holds the `Result`
-//! error types returned by providers, tools, and planners.
+//! live in [`crate::recoverable::RecoverableError`]; this module holds the `Result`
+//! error types returned by providers and tools.
 
 use thiserror::Error;
 
@@ -62,18 +62,7 @@ pub enum ToolError {
     ExecutionFailed(String),
 }
 
-/// A planner failed to produce a plan. The loop classifies these: [`Self::Provider`]
-/// is fatal (terminates the run); [`Self::Malformed`] is recoverable (observed,
-/// the loop continues).
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum PlannerError {
-    #[error(transparent)]
-    Provider(#[from] ProviderError),
-    #[error("malformed model output: {0}")]
-    Malformed(String),
-}
-
-/// A fatal, run-terminating error. Carried by [`crate::budget::TerminalReason::Fatal`].
+/// A fatal, run-terminating error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AgentError {
     #[error("fatal provider error: {0}")]
@@ -89,15 +78,6 @@ mod tests {
             status,
             body: "err".into(),
         }
-    }
-
-    #[test]
-    fn provider_error_into_planner_error() {
-        let p = PlannerError::from(ProviderError::Transport("down".into()));
-        assert_eq!(
-            p,
-            PlannerError::Provider(ProviderError::Transport("down".into()))
-        );
     }
 
     #[test]

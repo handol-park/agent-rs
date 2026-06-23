@@ -2,8 +2,8 @@
 
 use serde_json::Value;
 
-use crate::action::RecoverableError;
 use crate::mind::TaskFault;
+use crate::recoverable::RecoverableError;
 
 /// The result of actuating a command: a tool result or a recoverable error.
 #[derive(Debug, Clone, PartialEq)]
