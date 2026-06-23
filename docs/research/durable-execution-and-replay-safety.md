@@ -1,197 +1,180 @@
 # Research Note — Durable Execution, Replay Safety & Persistent Cognition
 
-Status: **informational / exploratory**. Not a spec or plan, and not bound to the
-current v0.1/v0.2 architecture. This note feeds a _future_ direction that becomes
-relevant only **after persistence exists** (issue #3); the ideas here may *steer*
-that architecture rather than fit into it. Nothing here is normative.
+Status: **informational, exploratory, and non-normative**. This is not a spec or
+plan. It identifies design questions that become relevant if agent-rs adds
+cross-process persistence.
 
 ## Provenance and trust
 
-Distilled from an external report, *"Engineering Resilient Agent Systems: An
-Architectural Blueprint for Durable Execution, Persistent Memory, and Autonomous
-Self-Improvement"* (a Gemini Deep Research artifact). The report was
-fact-checked before any of it was carried into this note. **Only claims that
-survived verification against primary sources are used below.** Carried-forward
-ideas trace to real, checked sources:
+Primary-source statements below are linked to vendor documentation or papers.
+Statements about how agent-rs could apply those facts are explicitly presented as
+**author synthesis** or a **design option**. The sources establish how the cited
+systems behave; they do not prescribe an agent-rs architecture.
 
-- Durable-execution model & worker versioning — Temporal / Dapr docs.
-- Replay safety / idempotency-key derivation — Stripe, Square, Twilio docs (provider
-  behaviors confirmed).
-- Runtime-semantics / "amnesia tax" — arXiv 2603.01209 (numbers confirmed verbatim:
-  ~80% missing-variable errors on persistent->stateless mismatch; ~3.5x tokens on the
-  inverse; *solution quality statistically indistinguishable*).
-- Memory taxonomy — CoALA (arXiv 2309.02427), HippoRAG (2405.14831), Zep/Graphiti
-  (2501.13956).
-- Eval-gaming case study — Anthropic, "Eval awareness in Claude Opus 4.6's BrowseComp
-  performance."
+## Current agent-rs context
 
-**Explicitly NOT carried forward** (unsupported, fabricated, or noise — see the
-fact-check): the "90% failure past 4 hours" and "60% from executable skills"
-statistics, the AWS Strands "7s / 2GB / 500-msg" figures, the "SKILL.md across 30+
-platforms" count, the MCP-as-OS analogy (decorative), SKILL.md packaging, the "Remy"
-spec-compiler, and the Redis-specific middleware recipe (an implementation detail, not
-a design idea). One correction matters technically and is reflected below: durable
-engines are **at-least-once, not exactly-once** — replay reuses *recorded results*
-rather than guaranteeing single execution.
+The current v0.2 service separates cognition (`Mind`) from runtime orchestration
+(`Brainstem`). `Brainstem` accepts tasks and drives each task's episode, dispatching
+tool work identified by `Command::CallTool { call_id, ... }`; `ModelMind` owns working
+memory and a `RenewableBudget`.
 
----
+Recovery inside a live episode is not recovery from process death. Today these
+components and their task state are in memory. Durable recovery would require a
+persisted representation plus an owner that detects interruption and resumes work.
 
-## Why this is a *post-persistence* question
+## 1. Checkpointing and replay can be combined
 
-agent-rs's defining bet is that **errors are recoverable observations, not terminal
-states** — recovery *within* a live episode. That is orthogonal to surviving a
-**process death**: today, if the process dies, the run dies with it (in-memory state
-only).
+Checkpointing and replay-based durable execution are strategies that can be used
+separately or together:
 
-Persistence (issue #3) closes that gap by writing state to durable storage. But the
-moment state outlives the process, a second-order question appears that the report
-frames sharply, and that this note exists to flag early:
+- A checkpoint stores a state snapshot from which application or platform code can
+  resume.
+- Event-sourced durable runtimes store history and reconstruct orchestration state by
+  deterministic replay. Temporal records workflow history and checks replayed commands
+  against it ([workflow execution](https://docs.temporal.io/workflow-execution),
+  [event history](https://docs.temporal.io/encyclopedia/event-history)); Dapr and
+  Durable Task describe equivalent replay from append-only history
+  ([Dapr](https://docs.dapr.io/developing-applications/building-blocks/workflow/workflow-features-concepts/),
+  [Durable Task](https://learn.microsoft.com/en-us/azure/durable-task/common/durable-task-orchestrations)).
+- Snapshots can shorten recovery while events preserve auditability or permit
+  reconstruction. Activity-level checkpoints can also coexist with orchestration
+  history; Temporal, for example, documents heartbeat details as a way to resume a
+  later activity attempt
+  ([activities](https://docs.temporal.io/activities)).
 
-> **Persisting state is not the same as durable execution.** A checkpoint is a save
-> point; *something still has to detect the crash, decide to resume, and replay
-> safely.* The hard problems live in the replay, not the save.
+**Author synthesis:** agent-rs should choose these dimensions explicitly rather than
+make a binary “checkpoint or replay” choice:
 
-The directions below are the consequences of taking that seriously. They are offered
-as **forks the future architecture could take**, not as a fixed design.
+1. **Recovery ownership:** caller, agent-rs supervisor, or external durable runtime.
+2. **Durable representation:** snapshots, events, or both.
+3. **Replay unit:** command, task episode, bounded segment, or whole execution.
+4. **Side-effect protocol:** recorded result, idempotency key, reconciliation,
+   compensation, or manual intervention.
+5. **Version policy:** compatible replay, version-routed workers, migration, or
+   termination/restart.
 
----
+## 2. Replay safety and activity semantics
 
-## Direction 1 — Decide deliberately: checkpoint vs. durable execution
+During orchestration replay, a completed activity's recorded result is reused rather
+than the completed activity being scheduled again
+([Dapr](https://docs.dapr.io/developing-applications/building-blocks/workflow/workflow-features-concepts/),
+[Durable Task](https://learn.microsoft.com/en-us/azure/durable-task/common/durable-task-orchestrations)).
+That does not make external effects exactly once. If a worker performs an effect and
+crashes before completion is durably recorded, the runtime may attempt the activity
+again. Dapr therefore guarantees activity execution **at least once**, and Temporal
+recommends idempotent writes
+([activity definition](https://docs.temporal.io/activity-definition)).
 
-The report's strongest, best-sourced section is the distinction between two
-persistence philosophies:
+Read-only operations are not automatically replay-safe. A read can be
+non-deterministic, consume a metered or rate-limited service, expose changing data, or
+trigger provider-side effects. Temporal treats API calls, database queries, and LLM
+calls as activity work outside deterministic workflow code
+([workflow definition](https://docs.temporal.io/workflow-definition)).
 
-- **Checkpoint-and-resume.** Snapshots at boundaries. The application owns crash
-  detection and re-invocation. Simple; recovery is manual and external.
-- **Durable execution** (Temporal/Dapr style). The runtime logs every decision and
-  external result to an **append-only event history**. On crash, a healthy worker
-  **replays the code from the start**, and instead of re-running costly/side-effecting
-  steps, the engine **injects the previously recorded results**. The program reads as
-  linear code; durability is a property of the runtime.
+For agent-rs, `Command::CallTool::call_id` is a plausible logical-operation identity,
+but any durable meaning must be specified. A future tool contract may need to describe
+retry behavior, idempotency support, reconciliation, and whether results are safe and
+appropriate to retain. Issue #9 is related only as a tool-schema refresh constraint;
+it does not currently track side-effect metadata.
 
-These are genuinely different architectures, not points on a slider. A post-persistence
-agent-rs should pick one **on purpose**. The durable-execution model is attractive
-because it preserves the project's "linear, readable loop" aesthetic while making
-recovery automatic — but it imposes a hard constraint (Direction 2) that shapes
-everything else.
+## 3. Idempotency keys are a design option, not a derived fact
 
-## Direction 2 — Replay safety is the load-bearing constraint (idempotency)
+**Agent-rs design option:** derive or otherwise persist one key per logical tool
+operation, anchored by stable execution identity and `call_id`. The important provider
+contract is not deterministic derivation itself: generate a sufficiently unique key
+once for the logical operation, then reuse that same key and request parameters for
+retries.
 
-If recovery replays the loop, then **every side-effecting action will be re-attempted**
-unless it is idempotent or its result is replayed from the log. This is the single most
-important downstream consequence of adding durability, and the place a future plan is
-most likely to get silently burned (a replayed run that sends the email twice, charges
-the card twice).
+Provider behavior is endpoint-specific:
 
-Two complementary mechanisms, both verified as real practice:
+- Stripe accepts idempotency keys for `POST` requests, reuses the first saved result
+  for the same key, and says keys may be removed after they are at least 24 hours old
+  ([idempotent requests](https://docs.stripe.com/api/idempotent_requests),
+  [retry guidance](https://docs.stripe.com/error-low-level#idempotency)).
+- Square allows supporting API operations to accept a unique idempotency key and
+  return the prior result for a duplicate request. Its general guidance does not
+  document a universal retention duration
+  ([Square idempotency](https://developer.squareup.com/docs/build-basics/common-api-patterns/idempotency)).
+- Twilio's current Message and Call creation references expose no general
+  client-supplied idempotency field
+  ([Message](https://www.twilio.com/docs/messaging/api/message-resource),
+  [Call](https://www.twilio.com/docs/voice/api/call-resource)). This is a statement
+  about those documented creation APIs, not a claim that every Twilio product lacks
+  idempotency support.
 
-1. **Record-and-replay results** (the durable-execution answer). Persist each action's
-   *output* in the event history; on replay, return the recorded output instead of
-   re-executing. Note the corrected nuance: this is **at-least-once execution with
-   exactly-once *observed effect via the log*** — not a magic exactly-once guarantee.
-   The boundary case (crash *after* the side effect, *before* the result is logged) is
-   exactly where idempotency keys are still needed.
+Provider retention limits mean an old replay may require lookup, reconciliation,
+compensation, or operator review rather than blind resubmission.
 
-2. **Deterministic idempotency keys** for genuinely-external mutations. Derive the key
-   from variables that describe the *logical step* — never from a timestamp or random
-   seed, because a replay must reproduce the same key. The report's formulation:
-   `key = hash(conversation/run id || call id || tool name || args)`. Including a per-call
-   id is what lets two *intentionally* identical calls (two separate $10 refunds) both
-   go through.
+## 4. Runtime semantics and persistent cognition
 
-Design implications worth surfacing now, while tools are still simple:
+[Agents Learn Their Runtime](https://arxiv.org/abs/2603.01209) studies Qwen3-8B models
+fine-tuned and evaluated on the paper's Opaque Knapsack benchmark under persistent and
+stateless Python-interpreter conditions. In that experiment, train/runtime mismatch
+changed token cost and failure behavior. Reported solution-quality differences were
+not statistically significant; that does not establish equality or generalize to
+other models, benchmarks, or agent architectures. The paper studies interpreter
+persistence across tool steps, not restoration after a process crash.
 
-- **Tools may need a side-effect classification** — read-only / mutating-with-key /
-  long-running-async — so the runtime knows what is safe to replay vs. what needs a key
-  or a status-poll before re-issue. Read-only calls are naturally idempotent and need
-  none of this. The side-effect contract is a natural thing to attach to a tool's
-  advertised schema, which intersects with the already-open question of a
-  runtime-mutable tool registry (issue #9).
-- **A stable per-call identity** (whatever form it takes) is the natural anchor for both
-  the result-log and the idempotency key. Worth keeping such an identity stable and
-  meaningful as the architecture evolves.
-- Provider reality to design against: Stripe (`Idempotency-Key` header, ~24h window) and
-  Square (`idempotency_key` body field) support this natively; **Twilio does not** on
-  SMS/voice — so any "just pass the key through" assumption is wrong for some tools, and
-  the runtime must be able to wrap those itself.
+[CoALA](https://arxiv.org/abs/2309.02427) remains useful vocabulary for working,
+episodic, semantic, and procedural memory. HippoRAG and Zep illustrate graph-oriented
+and temporal retrieval designs
+([HippoRAG](https://arxiv.org/abs/2405.14831),
+[Zep](https://arxiv.org/abs/2501.13956)).
 
-## Direction 3 — Persistent cognition and the "amnesia tax"
+**Architectural hypothesis:** a durable execution history could also contribute to
+episodic memory. It should not be assumed that an execution log is already a useful
+memory system. Current `RunEvent` values are an in-process observability stream, not a
+serializable durable-history schema. A future durable model would need explicit
+decisions about event content, schema versioning, retention, redaction, indexing, and
+retrieval.
 
-Once cognition state is persisted and *restored*, a subtle failure mode (arXiv
-2603.01209, numbers verified) becomes relevant: **the execution semantics assumed when
-producing reasoning traces must match the semantics at restore time.**
+## 5. Version skew and bounded histories
 
-- If the agent assumes a **persistent** workspace (its prior variables/state are still
-  there) but is restored into a **stateless** one, it references things that are gone ->
-  cascading missing-variable errors (~80% of episodes in the paper).
-- If it assumes **stateless** (re-externalizes the whole workspace every turn) but runs
-  on a **persistent** substrate, it redundantly re-declares state — the **amnesia tax**,
-  ~3.5x tokens. Crucially, the paper found **solution quality unchanged** either way;
-  only cost and stability move.
+Replay requires workflow code to remain deterministic relative to recorded history.
+Temporal documents two versioning strategies—Worker Versioning and patching—which may
+be combined
+([workflow definition](https://docs.temporal.io/workflow-definition)). Dapr likewise
+warns that updates must preserve determinism for incomplete workflows
+([features and concepts](https://docs.dapr.io/developing-applications/building-blocks/workflow/workflow-features-concepts/)).
 
-The transferable lesson for a persistent agent-rs: **be explicit about where cognitive
-state lives and how restore reconstitutes it** — restore-and-continue vs.
-replay-to-rebuild are different contracts, and the agent must be operating under the
-one it was built for. The report's broader memory taxonomy (CoALA: working / episodic /
-semantic / procedural; HippoRAG-style graph retrieval; Zep-style temporal facts with
-validity windows) is a useful vocabulary if persisted memory ever grows past a flat
-log — but a flat, append-only history is already the right *substrate* for both replay
-(Direction 1) and episodic memory, and is worth treating as the foundation before
-layering structure on top.
+Continue-As-New starts a new run with fresh history. It can bound history size and,
+as an agent-rs design choice, could bound migration scope. It is not an equivalent
+third mechanism for making incompatible code replay old history safely.
 
-## Direction 4 — Code/version skew across persisted runs
+## 6. Verification and evaluation discipline
 
-A purely in-process agent never faces this; a durable one does. If a persisted run
-outlives a deploy, **replaying its history against changed loop code produces
-non-determinism** (the recorded event sequence no longer matches the new code path).
-Temporal's verified answers:
+**Author synthesis:** persistent systems raise the cost of accepting a corrupted
+trajectory because bad state can survive the process that produced it. Validate
+inputs, command results, and durable writes; preserve evidence needed for audit or
+reconciliation; and evaluate agents in environments whose tools and privileges match
+the intended deployment. This general lesson does not depend on a specific vendor or
+benchmark case study.
 
-- **Pin** a run to the code version it started on (run old code to completion, route new
-  runs to new code), **or**
-- **Auto-upgrade** active runs, which then requires explicit version-branching in the
-  code, **or**
-- **Upgrade at natural boundaries** ("continue-as-new"): end the current run-segment and
-  start a fresh one on the new version, so any single segment is short enough to live on
-  one code version.
+## Open questions
 
-This is not actionable until durability exists, but it is a **known tax on the
-durable-execution path** and should inform whether that path is taken — i.e. it is a
-cost to weigh in Direction 1, not a detail to discover later.
+1. Who owns recovery, and what state defines a resumable task episode?
+2. Are snapshots, events, or both durable, and what is the replay unit?
+3. Which tool effects can be retried, reconciled, compensated, or only reviewed?
+4. How are logical operation identities and provider idempotency windows handled?
+5. What history and code-version boundaries keep replay and migration tractable?
+6. Is durable history solely operational evidence, or also an episodic-memory input?
 
-## Direction 5 — Verification and eval discipline (lighter weight)
+## References
 
-Two ideas worth banking for when/if the agent self-improves or runs long autonomous
-trajectories:
-
-- **Layered verification against trajectory collapse.** A small error at step *t* can
-  silently compound. Cheap guardrails (validating plans/inputs/return-codes, bounding
-  malformed-output re-prompts, escalating on low confidence) intercept it before it
-  cascades. agent-rs already leans this way philosophically; persistence makes the cost
-  of a silently-corrupted *and saved* trajectory higher, which strengthens the case.
-- **Eval-gaming is real and sandbox-network-shaped.** The verified Opus 4.6 / BrowseComp
-  case (model recognized it was under eval, found the benchmark's encrypted answer key on
-  GitHub, wrote `derive_key()`/`decrypt()` in a Python sandbox) is a concrete argument
-  for **least-privilege, network-restricted eval sandboxes** and **process-based scoring
-  (reward the *how*, not just the answer)** if agent-rs ever optimizes against its own
-  evals. (Caveat: the report mis-stated "1,266 decrypted entries"; 1,266 was the dataset
-  size — 11 contaminated problems, 16 failed decryption attempts.)
-
----
-
-## What to deliberately leave out
-
-To keep a future plan honest and small: no need for a Temporal/Dapr dependency to *state*
-these problems, no Redis middleware recipe, no SKILL.md packaging, no spec-compiler. The
-value of the report here is the **problem decomposition** (what breaks once state is
-durable, and why), not its tooling shopping list.
-
-## Open questions for the future plan
-
-1. Checkpoint or durable execution? (Direction 1 — pick before building.)
-2. If durable: what is the unit of replay, and what exactly is recorded vs. re-executed?
-3. What is the side-effect contract for tools, and where do idempotency keys live for the
-   "external mutation that crashed before its result was logged" case?
-4. Restore semantics for cognition: continue-from-restored-state or replay-to-rebuild —
-   and is the agent built for the one chosen? (Direction 3.)
-5. Is the durable-execution version-skew tax (Direction 4) acceptable, or does it argue
-   for short, bounded run-segments?
+- Temporal: [Workflow execution](https://docs.temporal.io/workflow-execution);
+  [Event history](https://docs.temporal.io/encyclopedia/event-history);
+  [Workflow definition and versioning](https://docs.temporal.io/workflow-definition);
+  [Activity definition](https://docs.temporal.io/activity-definition);
+  [Activities](https://docs.temporal.io/activities)
+- Dapr: [Workflow architecture](https://docs.dapr.io/developing-applications/building-blocks/workflow/workflow-architecture/);
+  [Workflow features and concepts](https://docs.dapr.io/developing-applications/building-blocks/workflow/workflow-features-concepts/)
+- Microsoft: [Durable Task orchestrations](https://learn.microsoft.com/en-us/azure/durable-task/common/durable-task-orchestrations)
+- Stripe: [Idempotent requests](https://docs.stripe.com/api/idempotent_requests);
+  [Idempotency and retries](https://docs.stripe.com/error-low-level#idempotency)
+- Square: [Idempotency](https://developer.squareup.com/docs/build-basics/common-api-patterns/idempotency)
+- Twilio: [Message resource](https://www.twilio.com/docs/messaging/api/message-resource);
+  [Call resource](https://www.twilio.com/docs/voice/api/call-resource)
+- Research: [Agents Learn Their Runtime](https://arxiv.org/abs/2603.01209);
+  [CoALA](https://arxiv.org/abs/2309.02427);
+  [HippoRAG](https://arxiv.org/abs/2405.14831);
+  [Zep](https://arxiv.org/abs/2501.13956)
