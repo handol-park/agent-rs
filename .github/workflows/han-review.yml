@@ -1,7 +1,7 @@
 # han-review caller stub — installed by `han-review-init`.
 #
 # On-demand multi-angle PR review. Comment one of the following on a PR:
-#   @claude review      — review with Claude
+#   @claude /han-review — review with Claude
 #   @codex review       — review with Codex
 #   @gemini-cli /review — review with Gemini
 #
