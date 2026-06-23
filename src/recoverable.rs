@@ -15,8 +15,6 @@ pub enum RecoverableError {
     UnknownTool(String),
     /// A registered tool rejected its input or failed.
     ToolFailed { name: String, error: String },
-    /// The model produced an action that failed validation.
-    MalformedPlan(String),
 }
 
 impl RecoverableError {
@@ -30,7 +28,6 @@ impl RecoverableError {
             RecoverableError::ToolFailed { name, error } => {
                 format!("error: tool '{name}' failed: {error}")
             }
-            RecoverableError::MalformedPlan(why) => format!("error: malformed action: {why}"),
         }
     }
 }

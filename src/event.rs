@@ -7,10 +7,10 @@
 use std::time::Duration;
 use tokio::time::Instant;
 
-use crate::action::RecoverableError;
 use crate::error::ProviderError;
 use crate::mind::TaskFault;
 use crate::observation::Outcome;
+use crate::recoverable::RecoverableError;
 
 /// One observable moment in a run, emitted in order.
 #[derive(Debug, Clone, PartialEq)]

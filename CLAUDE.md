@@ -4,8 +4,10 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-`agent-rs` is a production-shaped Rust agent framework. v0.1 (`Agent::run`) was
-removed in issue #13. The active architecture is v0.2 (Mind + Brainstem).
+`agent-rs` is a production-shaped Rust agent framework: a bounded perceive →
+plan → act → observe loop over a pluggable `Provider` (LLM) and a typed
+`ToolRegistry`. The active architecture is v0.2 (Mind + Brainstem): an actor
+service with a `Mind` for cognition and a `Brainstem` for the runtime drive loop.
 
 ## Build & verify
 

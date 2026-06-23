@@ -4,7 +4,6 @@
 //! `Brainstem` drives a perpetual task loop; `Mind` owns the LLM provider and
 //! resilience logic. See `AGENTS.md` and `docs/` for the full architecture.
 
-pub mod action;
 pub mod brainstem;
 pub mod budget;
 pub mod error;
@@ -12,9 +11,9 @@ pub mod event;
 pub mod mind;
 pub mod observation;
 pub mod provider;
+pub mod recoverable;
 pub mod tool;
 
-pub use action::RecoverableError;
 pub use brainstem::{Brainstem, Lifecycle, Snapshot, Task};
 pub use budget::{BudgetState, BudgetSummary, Period, RenewableBudget};
 pub use error::ErrorClass;
@@ -26,4 +25,5 @@ pub use mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
 pub use observation::{Observation, Outcome, TaskOutcome};
 pub use provider::{fake::FakeProvider, openai::OpenAiProvider};
 pub use provider::{Message, ModelRequest, ModelResponse, Provider, ToolCall, Usage};
+pub use recoverable::RecoverableError;
 pub use tool::{default_registry, Tool, ToolRegistry, ToolSchema};
