@@ -155,6 +155,14 @@ impl BudgetState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn weekly_period_is_seven_days() {
+        assert_eq!(
+            Period::Weekly.duration(),
+            Duration::from_secs(7 * 24 * 60 * 60)
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn window_calculation_from_zero() {
         let now = Instant::now();

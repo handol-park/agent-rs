@@ -36,8 +36,7 @@ v0.2 **Mind + Brainstem** actor service (spec 002). Cognition and runtime are sp
 | `src/lib.rs` | crate re-exports |
 | `src/mind/` | `Mind` trait; `Perception`/`Command`/`Decision`/`Reason`/`TaskFault`; `ModelMind` (provider + working memory + budget + classify/retry/backoff + malformed cap + throttle); `FakeMind` |
 | `src/brainstem/` | `Brainstem::run` perpetual drive loop (inbox/status/cancel `select!`, pinned decide, `spawn_blocking` actuate, throttle sleep); `Task`, `Snapshot`, `Lifecycle` |
-| `src/observation.rs` | `Observation`, `Outcome`, `TaskOutcome` |
-| `src/recoverable.rs` | `RecoverableError` — failures the loop observes and feeds back to the model (`UnknownTool`, `ToolFailed`) |
+| `src/observation.rs` | `Observation`, `Outcome`, `TaskOutcome`; `RecoverableError` — failures the loop observes and feeds back to the model (`UnknownTool`, `ToolFailed`) |
 | `src/budget.rs` | Renewable token window: `Period`, `RenewableBudget`, `BudgetState`, `BudgetSummary` |
 | `src/event.rs` | `RunEvent` (`TaskReceived`/`Command`/`CommandResult`/`RecoverableObservation`/`RetryScheduled`/`WindowReset`/`ThrottleSleep`/`TaskCompleted`/`TaskFailed`/`Terminated`), `Termination` |
 | `src/error.rs` | `ProviderError` (`Api{status}`/`Transport`/`Decode`), `AgentError`, `ErrorClass` classification |

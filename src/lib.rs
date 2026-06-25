@@ -11,7 +11,6 @@ pub mod event;
 pub mod mind;
 pub mod observation;
 pub mod provider;
-pub mod recoverable;
 pub mod tool;
 
 pub use brainstem::{Brainstem, Lifecycle, Snapshot, Task};
@@ -22,8 +21,7 @@ pub use event::{RunEvent, Termination};
 pub use mind::fake::FakeMind;
 pub use mind::model::ModelMind;
 pub use mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
-pub use observation::{Observation, Outcome, TaskOutcome};
+pub use observation::{Observation, Outcome, RecoverableError, TaskOutcome};
 pub use provider::{fake::FakeProvider, openai::OpenAiProvider};
 pub use provider::{Message, ModelRequest, ModelResponse, Provider, ToolCall, Usage};
-pub use recoverable::RecoverableError;
 pub use tool::{default_registry, Tool, ToolRegistry, ToolSchema};

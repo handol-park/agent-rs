@@ -9,8 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::BudgetSummary;
 use crate::event::{RunEvent, Termination};
 use crate::mind::{Command, Decision, Mind, Perception, Reason, TaskFault};
-use crate::observation::{Observation, Outcome, TaskOutcome};
-use crate::recoverable::RecoverableError;
+use crate::observation::{Observation, Outcome, RecoverableError, TaskOutcome};
 use crate::tool::ToolRegistry;
 
 /// A task submitted to the brainstem's inbox.
