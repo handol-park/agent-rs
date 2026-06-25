@@ -3,6 +3,8 @@
 //! A bad action or a failed tool becomes a [`RecoverableError`] — recorded and
 //! fed back to the model — not a terminal state.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -33,6 +35,12 @@ impl RecoverableError {
     }
 }
 
+impl fmt::Display for RecoverableError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
 /// The result of actuating a command: a tool result or a recoverable error.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Observation {
@@ -56,4 +64,19 @@ pub struct Outcome {
 pub enum TaskOutcome {
     Completed(Outcome),
     Failed(TaskFault),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recoverable_error_display_matches_message() {
+        let error = RecoverableError::ToolFailed {
+            name: "search".to_string(),
+            error: "timeout".to_string(),
+        };
+
+        assert_eq!(error.to_string(), error.message());
+    }
 }
