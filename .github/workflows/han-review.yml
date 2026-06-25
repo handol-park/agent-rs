@@ -22,5 +22,5 @@ permissions:
   actions: read
 jobs:
   review:
-    uses: handol-park/han-review/.github/workflows/review.yml@v1
+    uses: handol-park/han-review/.github/workflows/review.yml@main
     secrets: inherit
